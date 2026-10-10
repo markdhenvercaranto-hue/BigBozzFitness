@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Big Bozz Fitness Gym - Santo Tomas, Pangasinan</title>
+
+    <!-- Tailwind CSS CDN + config -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        gold: {
+                            400: '#facc15',
+                            500: '#eab308',
+                            600: '#ca8a04',
+                        },
+                        darkbg: '#0f1015',
+                        cardbg: '#181a20',
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Chart.js for Admin Analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- jsPDF & html2canvas for Receipt Download -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+    <!-- Custom styles -->
+    <link rel="stylesheet" href="BBFDesign.css">
+</head>
+<body class="bg-darkbg text-gray-100 flex flex-col min-h-screen">
+
+    <header class="sticky top-0 z-50 bg-black/80 backdrop-blur-md border-b border-gray-800">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-20 flex items-center justify-between">
+            <!-- Logo -->
+            <a href="#" onclick="showSection('public')" class="flex items-center gap-3">
+                <div class="bg-gold-500 text-black p-2 rounded-xl font-bold text-2xl font-heading tracking-wider flex items-center justify-center w-11 h-11">
+                    BB
+                </div>
+                <div>
+                    <span class="font-heading text-3xl font-bold tracking-wider text-white block leading-none">BIG BOZZ</span>
+                    <span class="text-xs text-gold-400 font-semibold tracking-widest uppercase block -mt-1">FITNESS GYM</span>
+                </div>
+            </a>
+
+            <!-- Desktop Nav Links -->
+            <nav class="hidden md:flex items-center gap-8 font-medium text-sm tracking-wide">
+                <a href="#plans" onclick="showSection('public')" class="hover:text-gold-400 transition-colors">PLANS & PRICING</a>
+                <a href="#calculator" onclick="showSection('public')" class="hover:text-gold-400 transition-colors">CALCULATOR</a>
+                <a href="#contact" onclick="showSection('public')" class="hover:text-gold-400 transition-colors">LOCATION</a>
+                <button onclick="showSection('public'); scrollToCalculator();" class="bg-gold-500 hover:bg-gold-600 text-black px-5 py-2.5 rounded-lg font-bold transition-transform transform active:scale-95 shadow-lg shadow-gold-500/20">
+                    JOIN NOW
+                </button>
+            </nav>
+
+            <!-- Mode Switcher (Public / Admin Dashboard) -->
+            <div class="flex items-center gap-3">
+                <button id="viewToggleBtn" onclick="togglePortal()" class="border border-gold-500/50 bg-gold-500/10 text-gold-400 hover:bg-gold-500 hover:text-black px-3.5 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all">
+                    <i class="fa-solid fa-user-shield"></i>
+                    <span id="portalBtnText">Owner Login</span>
+                </button>
+
+                <button onclick="toggleMobileMenu()" class="md:hidden text-gray-300 hover:text-white p-2">
+                    <i class="fa-solid fa-bars text-2xl"></i>
+                </button>
+            </div>
+        </div>
+
+        <!-- Mobile Nav Menu -->
+        <div id="mobileMenu" class="hidden md:hidden bg-cardbg border-b border-gray-800 px-4 py-4 space-y-3">
+            <a href="#plans" onclick="toggleMobileMenu(); showSection('public');" class="block py-2 text-gray-300 hover:text-gold-400">PLANS & PRICING</a>
+            <a href="#calculator" onclick="toggleMobileMenu(); showSection('public');" class="block py-2 text-gray-300 hover:text-gold-400">CALCULATOR & JOIN</a>
+            <a href="#contact" onclick="toggleMobileMenu(); showSection('public');" class="block py-2 text-gray-300 hover:text-gold-400">LOCATION & CONTACT</a>
+        </div>
+    </header>
+
+    <!-- MAIN CONTAINER -->
+    <main class="flex-grow">
+
+        <!-- ========================================================= -->
+        <!-- PUBLIC WEBSITE VIEW SECTION                               -->
+        <!-- ========================================================= -->
+        <div id="publicView" class="space-y-24 pb-20">
+
+            <section class="relative bg-gradient-to-b from-black via-darkbg to-darkbg overflow-hidden pt-12 pb-20 lg:pt-20 lg:pb-32">
+                <div class="absolute inset-0 opacity-20 bg-[radial-gradient(#eab308_1px,transparent_1px)] [background-size:24px_24px]"></div>
+
+                <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10 grid lg:grid-cols-2 gap-12 items-center">
+                    <div class="space-y-6 text-center lg:text-left">
+                        <div class="inline-flex items-center gap-2 bg-gold-500/10 border border-gold-500/30 text-gold-400 text-xs font-bold px-4 py-2 rounded-full uppercase tracking-wider">
+                            <i class="fa-solid fa-location-dot"></i> MK Tower, Santo Tomas, Pangasinan
+                        </div>
+                        <h1 class="text-5xl sm:text-7xl font-extrabold font-heading tracking-tight leading-none uppercase">
+                            BUILD YOUR <span class="text-gold-500 glow-gold">LEGACY</span> HERE.
+                        </h1>
+                        <p class="text-lg text-gray-400 max-w-xl mx-auto lg:mx-0 font-light">
+                            Unleash your strength at <strong class="text-white font-semibold">Big Bozz Fitness Gym</strong>. Flexible monthly, 6-month memberships, walk-in sessions, and certified personal trainers ready to guide your gains.
+                        </p>
+
+                        <div class="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4 pt-4">
+                            <button onclick="scrollToCalculator()" class="w-full sm:w-auto bg-gold-500 hover:bg-gold-600 text-black px-8 py-4 rounded-xl font-bold text-lg shadow-xl shadow-gold-500/25 transition-all transform hover:-translate-y-0.5">
+                                CALCULATE PLAN & REGISTER <i class="fa-solid fa-arrow-right ml-2"></i>
+                            </button>
+                            <a href="tel:+639662669929" class="w-full sm:w-auto border border-gray-700 bg-cardbg/80 hover:border-gray-500 px-6 py-4 rounded-xl font-semibold flex items-center justify-center gap-2 text-gray-200">
+                                <i class="fa-solid fa-phone text-gold-400"></i> +63 966 266 9929
+                            </a>
+                        </div>
+
+                        <!-- Quick Badges -->
+                        <div class="pt-6 grid grid-cols-3 gap-4 border-t border-gray-800/80">
+                            <div>
+                                <div class="font-heading text-3xl font-bold text-white">₱50</div>
+                                <div class="text-xs text-gray-400">Walk-in / Session</div>
+                            </div>
+                            <div>
+                                <div class="font-heading text-3xl font-bold text-gold-400">₱450/mo</div>
+                                <div class="text-xs text-gray-400">6-Month Rate</div>
+                            </div>
+                            <div>
+                                <div class="font-heading text-3xl font-bold text-white">PRO</div>
+                                <div class="text-xs text-gray-400">Personal Trainers</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Hero Visual / Feature Card -->
+                    <div class="relative">
+                        <div class="absolute -inset-1 bg-gradient-to-r from-gold-500 to-yellow-600 rounded-3xl blur opacity-25"></div>
+                        <div class="relative bg-cardbg border border-gray-800 rounded-2xl p-8 space-y-6">
+                            <div class="flex items-center justify-between border-b border-gray-800 pb-4">
+                                <span class="text-sm font-semibold uppercase tracking-wider text-gold-400">Quick Rates Sheet</span>
+                                <span class="text-xs text-gray-500">MK Tower Branch</span>
+                            </div>
+
+                            <div class="space-y-4">
+                                <div class="flex justify-between items-center bg-black/40 p-4 rounded-xl border border-gray-800">
+                                    <div>
+                                        <div class="font-bold text-white">Walk-in Session</div>
+                                        <div class="text-xs text-gray-400">No commitment, full equipment access</div>
+                                    </div>
+                                    <span class="text-xl font-bold font-heading text-gold-400">₱50</span>
+                                </div>
+
+                                <div class="flex justify-between items-center bg-black/40 p-4 rounded-xl border border-gray-800">
+                                    <div>
+                                        <div class="font-bold text-white">Monthly Standard</div>
+                                        <div class="text-xs text-gray-400">Billed monthly</div>
+                                    </div>
+                                    <span class="text-xl font-bold font-heading text-gold-400">₱500 / mo</span>
+                                </div>
+
+                                <div class="flex justify-between items-center bg-gold-500/10 p-4 rounded-xl border border-gold-500/40 relative">
+                                    <span class="absolute -top-2.5 right-4 bg-gold-500 text-black font-extrabold text-[10px] px-2 py-0.5 rounded-full uppercase">Best Value</span>
+                                    <div>
+                                        <div class="font-bold text-white">6-Month Membership</div>
+                                        <div class="text-xs text-gold-400">₱450/mo × 6 = ₱2,700 total</div>
+                                    </div>
+                                    <span class="text-xl font-bold font-heading text-gold-400">₱2,700</span>
+                                </div>
+
+                                <div class="flex justify-between items-center bg-black/40 p-4 rounded-xl border border-gray-800">
+                                    <div>
+                                        <div class="font-bold text-white">Fitness Trainer Add-on</div>
+                                        <div class="text-xs text-gray-400">1-on-1 coaching & program</div>
+                                    </div>
+                                    <span class="text-xl font-bold font-heading text-gray-300">₱1,500 / mo</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="plans" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="text-center max-w-3xl mx-auto mb-16">
+                    <h2 class="text-4xl sm:text-5xl font-heading font-extrabold text-white">CHOOSE YOUR MEMBERSHIP</h2>
+                    <p class="text-gray-400 mt-2">Transparent pricing with zero hidden fees. Select what fits your fitness goals.</p>
+                </div>
+
+                <div class="grid md:grid-cols-3 gap-8">
+                    <!-- Daily Walk-In -->
+                    <div class="bg-cardbg border border-gray-800 rounded-2xl p-8 flex flex-col justify-between hover:border-gray-700 transition-all">
+                        <div>
+                            <div class="text-sm font-bold text-gray-400 uppercase tracking-widest mb-2">Casual Fitness</div>
+                            <h3 class="text-2xl font-bold text-white">Walk-in Session</h3>
+                            <div class="mt-4 flex items-baseline gap-1">
+                                <span class="text-5xl font-extrabold font-heading text-white">₱50</span>
+                                <span class="text-gray-400 text-sm">/ single visit</span>
+                            </div>
+                            <ul class="mt-8 space-y-3 text-sm text-gray-300">
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Full Gym Floor Access</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Free Weights & Cardio Zone</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Locker Room Access</li>
+                                <li class="flex items-center gap-3 text-gray-500"><i class="fa-solid fa-xmark"></i> Personal Trainer Excluded</li>
+                            </ul>
+                        </div>
+                        <button onclick="selectPlanInCalc('walkin')" class="mt-8 w-full border border-gold-500 text-gold-400 hover:bg-gold-500 hover:text-black py-3 rounded-xl font-bold transition-all">
+                            PAY PER VISIT
+                        </button>
+                    </div>
+
+                    <!-- Monthly Plan -->
+                    <div class="bg-cardbg border border-gray-800 rounded-2xl p-8 flex flex-col justify-between hover:border-gray-700 transition-all">
+                        <div>
+                            <div class="text-sm font-bold text-gray-400 uppercase tracking-widest mb-2">Standard Plan</div>
+                            <h3 class="text-2xl font-bold text-white">1-Month Pass</h3>
+                            <div class="mt-4 flex items-baseline gap-1">
+                                <span class="text-5xl font-extrabold font-heading text-white">₱500</span>
+                                <span class="text-gray-400 text-sm">/ month</span>
+                            </div>
+                            <ul class="mt-8 space-y-3 text-sm text-gray-300">
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Unlimited Monthly Visits</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> All Gym Equipment & Racks</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Locker & Shower Facilities</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Optional Trainer Add-on</li>
+                            </ul>
+                        </div>
+                        <button onclick="selectPlanInCalc('monthly')" class="mt-8 w-full border border-gold-500 text-gold-400 hover:bg-gold-500 hover:text-black py-3 rounded-xl font-bold transition-all">
+                            SELECT MONTHLY
+                        </button>
+                    </div>
+
+                    <!-- 6-Month Plan (Highlighted) -->
+                    <div class="bg-cardbg border-2 border-gold-500 rounded-2xl p-8 flex flex-col justify-between relative box-glow">
+                        <span class="absolute -top-3.5 left-1/2 -translate-x-1/2 bg-gold-500 text-black font-black text-xs px-4 py-1 rounded-full uppercase tracking-widest">MOST POPULAR</span>
+                        <div>
+                            <div class="text-sm font-bold text-gold-400 uppercase tracking-widest mb-2">Long Term Value</div>
+                            <h3 class="text-2xl font-bold text-white">6-Month Commitment</h3>
+                            <div class="mt-4 flex items-baseline gap-2">
+                                <span class="text-5xl font-extrabold font-heading text-gold-400">₱2,700</span>
+                                <span class="text-gray-400 text-sm">Total (₱450/mo)</span>
+                            </div>
+                            <p class="text-xs text-gold-400/80 mt-1">Save ₱300 compared to standard monthly rate!</p>
+
+                            <ul class="mt-8 space-y-3 text-sm text-gray-300">
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> 6 Months Unlimited Gym Access</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Priority Equipment Coaching Intro</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Locked Discount Rate (₱450/mo)</li>
+                                <li class="flex items-center gap-3"><i class="fa-solid fa-check text-gold-500"></i> Optional Trainer Add-on</li>
+                            </ul>
+                        </div>
+                        <button onclick="selectPlanInCalc('6month')" class="mt-8 w-full bg-gold-500 hover:bg-gold-600 text-black py-3 rounded-xl font-bold shadow-lg shadow-gold-500/20 transition-all">
+                            SELECT 6-MONTH PLAN
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <section id="calculator" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="bg-cardbg border border-gray-800 rounded-3xl p-6 sm:p-10 shadow-2xl">
+                    <div class="grid lg:grid-cols-12 gap-10">
+
+                        <!-- Left: Form Inputs -->
+                        <div class="lg:col-span-7 space-y-8">
+                            <div>
+                                <span class="text-gold-400 font-bold text-sm tracking-wider uppercase">Interactive Cost Calculator</span>
+                                <h2 class="text-3xl sm:text-4xl font-heading font-bold text-white mt-1">CALCULATE & REGISTER</h2>
+                                <p class="text-gray-400 text-sm mt-1">Customize your membership plan and optional personal trainer add-on.</p>
+                            </div>
+
+                            <form id="calcForm" onsubmit="handleRegistrationSubmit(event)" class="space-y-6">
+                                <!-- Personal Info -->
+                                <div class="grid sm:grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-400 uppercase mb-2">Full Name *</label>
+                                        <input type="text" id="regName" required placeholder="e.g. Juan Dela Cruz" class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-gold-500 transition-colors">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold text-gray-400 uppercase mb-2">Phone Number *</label>
+                                        <input type="tel" id="regPhone" required placeholder="+63 9XX XXX XXXX" class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-gold-500 transition-colors">
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-xs font-semibold text-gray-400 uppercase mb-2">Membership Base Plan *</label>
+                                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                        <label class="plan-radio-label cursor-pointer">
+                                            <input type="radio" name="planSelection" value="walkin" onchange="calculateTotal()" class="peer hidden">
+                                            <div class="p-4 rounded-xl border border-gray-800 bg-black/40 peer-checked:border-gold-500 peer-checked:bg-gold-500/10 transition-all text-center">
+                                                <div class="font-bold text-white text-sm">Walk-in</div>
+                                                <div class="text-gold-400 font-heading text-xl mt-1">₱50/session</div>
+                                            </div>
+                                        </label>
+
+                                        <label class="plan-radio-label cursor-pointer">
+                                            <input type="radio" name="planSelection" value="monthly" checked onchange="calculateTotal()" class="peer hidden">
+                                            <div class="p-4 rounded-xl border border-gray-800 bg-black/40 peer-checked:border-gold-500 peer-checked:bg-gold-500/10 transition-all text-center">
+                                                <div class="font-bold text-white text-sm">Monthly</div>
+                                                <div class="text-gold-400 font-heading text-xl mt-1">₱500/mo</div>
+                                            </div>
+                                        </label>
+
+                                        <label class="plan-radio-label cursor-pointer">
+                                            <input type="radio" name="planSelection" value="6month" onchange="calculateTotal()" class="peer hidden">
+                                            <div class="p-4 rounded-xl border border-gray-800 bg-black/40 peer-checked:border-gold-500 peer-checked:bg-gold-500/10 transition-all text-center">
+                                                <div class="font-bold text-white text-sm">6-Month</div>
+                                                <div class="text-gold-400 font-heading text-xl mt-1">₱2,700 total</div>
+                                            </div>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <!-- Add-ons -->
+                                <div class="bg-black/40 border border-gray-800 rounded-2xl p-5 space-y-4">
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex items-center gap-3">
+                                            <input type="checkbox" id="trainerAddon" onchange="calculateTotal()" class="w-5 h-5 rounded text-gold-500 focus:ring-gold-500 border-gray-700 bg-black">
+                                            <div>
+                                                <label for="trainerAddon" class="font-bold text-white cursor-pointer">Include Fitness Trainer</label>
+                                                <p class="text-xs text-gray-400">Personalized 1-on-1 coaching & workout split</p>
+                                            </div>
+                                        </div>
+                                        <span class="font-heading text-xl text-gold-400 font-bold">+₱1,500<span class="text-xs text-gray-400 font-normal">/mo</span></span>
+                                    </div>
+                                </div>
+
+                                <button type="submit" class="w-full bg-gold-500 hover:bg-gold-600 text-black py-4 rounded-xl font-bold text-lg shadow-lg shadow-gold-500/20 transition-all flex items-center justify-center gap-2">
+                                    <i class="fa-solid fa-receipt"></i> GENERATE RECEIPT & REGISTER
+                                </button>
+                            </form>
+                        </div>
+
+                        <!-- Right: Live Cost Breakdown Box -->
+                        <div class="lg:col-span-5 bg-black/60 border border-gray-800 rounded-2xl p-6 flex flex-col justify-between">
+                            <div class="space-y-6">
+                                <div class="flex items-center justify-between border-b border-gray-800 pb-4">
+                                    <h3 class="font-heading text-2xl text-white">ESTIMATED SUMMARY</h3>
+                                    <span class="text-xs bg-gold-500/20 text-gold-400 border border-gold-500/30 px-3 py-1 rounded-full font-semibold">LIVE CALCULATOR</span>
+                                </div>
+
+                                <div class="space-y-4 text-sm">
+                                    <div class="flex justify-between items-center text-gray-300">
+                                        <span id="summaryPlanName">Monthly Plan (1 Month)</span>
+                                        <span id="summaryPlanCost" class="font-semibold text-white">₱500</span>
+                                    </div>
+
+                                    <div class="flex justify-between items-center text-gray-300">
+                                        <span>Personal Fitness Trainer</span>
+                                        <span id="summaryTrainerCost" class="font-semibold text-gray-400">₱0</span>
+                                    </div>
+
+                                    <div class="flex justify-between items-center text-gray-300">
+                                        <span>Registration / Processing Fee</span>
+                                        <span class="font-semibold text-green-400">FREE</span>
+                                    </div>
+
+                                    <div class="border-t border-gray-800 pt-4 flex justify-between items-baseline">
+                                        <span class="text-base font-bold text-white">Total Amount Due</span>
+                                        <span id="summaryGrandTotal" class="text-4xl font-heading font-extrabold text-gold-400">₱500</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-8 pt-6 border-t border-gray-800 text-xs text-gray-400 space-y-2">
+                                <p><i class="fa-solid fa-shield-halved text-gold-400 mr-1"></i> Pay directly at gym counter via Cash or GCash upon registration confirmation.</p>
+                                <p><i class="fa-solid fa-clock text-gold-400 mr-1"></i> Instant digital receipt issued upon submission.</p>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </section>
+
+            <section id="contact" class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+                <div class="grid lg:grid-cols-2 gap-8 items-stretch">
+
+                    <!-- Contact Info Card -->
+                    <div class="bg-cardbg border border-gray-800 rounded-3xl p-8 space-y-8 flex flex-col justify-between">
+                        <div class="space-y-6">
+                            <span class="text-gold-400 font-bold text-sm tracking-wider uppercase">VISIT OUR GYM</span>
+                            <h2 class="text-4xl font-heading font-bold text-white">LOCATION & CONTACT</h2>
+
+                            <div class="space-y-4">
+                                <div class="flex items-start gap-4">
+                                    <div class="bg-gold-500/10 text-gold-400 p-3 rounded-xl border border-gold-500/20">
+                                        <i class="fa-solid fa-location-dot text-xl"></i>
+                                    </div>
+                                    <div>
+                                        <h4 class="font-bold text-white">Gym Address</h4>
+                                        <p class="text-gray-400 text-sm">MK Tower, San Antonio, Santo Tomas, Pangasinan, Philippines</p>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-start gap-4">
+                                    <div class="bg-gold-500/10 text-gold-400 p-3 rounded-xl border border-gold-500/20">
+                                        <i class="fa-solid fa-phone text-xl"></i>
+                                    </div>
+                                    <div>
+                                        <h4 class="font-bold text-white">Mobile / Contact</h4>
+                                        <p class="text-gray-400 text-sm">+63 966 266 9929</p>
+                                    </div>
+                                </div>
+
+                                <div class="flex items-start gap-4">
+                                    <div class="bg-gold-500/10 text-gold-400 p-3 rounded-xl border border-gold-500/20">
+                                        <i class="fa-brands fa-facebook-f text-xl"></i>
+                                    </div>
+                                    <div>
+                                        <h4 class="font-bold text-white">Facebook Page</h4>
+                                        <p class="text-gray-400 text-sm">Big Bozz Fitness Gym</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="grid grid-cols-2 gap-4 pt-4 border-t border-gray-800">
+                            <a href="https://www.facebook.com" target="_blank" rel="noopener noreferrer" class="bg-blue-600 hover:bg-blue-700 text-white py-3 px-4 rounded-xl font-bold text-sm text-center flex items-center justify-center gap-2">
+                                <i class="fa-brands fa-facebook"></i> Facebook Page
+                            </a>
+                            <a href="https://wa.me/639662669929" target="_blank" rel="noopener noreferrer" class="bg-emerald-600 hover:bg-emerald-700 text-white py-3 px-4 rounded-xl font-bold text-sm text-center flex items-center justify-center gap-2">
+                                <i class="fa-brands fa-whatsapp"></i> Chat / Message
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- Map Container -->
+                    <div class="bg-cardbg border border-gray-800 rounded-3xl p-3 h-80 lg:h-auto min-h-[320px] relative overflow-hidden">
+                        <iframe
+                            class="w-full h-full rounded-2xl border-0 grayscale opacity-80 hover:grayscale-0 hover:opacity-100 transition-all duration-300"
+                            src="https://maps.google.com/maps?q=San%20Antonio%20Santo%20Tomas%20Pangasinan&t=&z=14&ie=UTF8&iwloc=&output=embed"
+                            allowfullscreen=""
+                            loading="lazy">
+                        </iframe>
+                    </div>
+
+                </div>
+            </section>
+
+        </div>
+
+        <!-- ========================================================= -->
+        <!-- ADMIN DASHBOARD SECTION                                   -->
+        <!-- ========================================================= -->
+        <div id="adminView" class="hidden max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+
+            <!-- Dashboard Title Bar -->
+            <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-gray-800 pb-6">
+                <div>
+                    <span class="text-xs text-gold-400 font-bold tracking-widest uppercase">Management Portal</span>
+                    <h1 class="text-3xl font-heading font-extrabold text-white">ADMIN DASHBOARD</h1>
+                </div>
+
+                <div class="flex items-center gap-3">
+                    <button onclick="createNewWalkinModal()" class="bg-gold-500 hover:bg-gold-600 text-black px-4 py-2.5 rounded-xl font-bold text-sm flex items-center gap-2">
+                        <i class="fa-solid fa-plus"></i> Quick Walk-in Entry
+                    </button>
+                    <button onclick="exportDataCSV()" class="border border-gray-700 hover:bg-gray-800 text-gray-300 px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2">
+                        <i class="fa-solid fa-download"></i> Export Data
+                    </button>
+                    <button onclick="logoutAdmin()" class="border border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500 hover:text-white px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2">
+                        <i class="fa-solid fa-right-from-bracket"></i> Logout
+                    </button>
+                </div>
+            </div>
+
+            <!-- Dashboard Sub-Navigation Tabs -->
+            <div class="flex border-b border-gray-800 overflow-x-auto text-sm font-semibold">
+                <button onclick="switchAdminTab('customers')" id="tab-customers" class="admin-tab-btn py-3 px-5 border-b-2 border-gold-500 text-gold-400 flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-users"></i> Customers
+                </button>
+                <button onclick="switchAdminTab('members')" id="tab-members" class="admin-tab-btn py-3 px-5 border-b-2 border-transparent text-gray-400 hover:text-white flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-id-card"></i> Members
+                </button>
+                <button onclick="switchAdminTab('orders')" id="tab-orders" class="admin-tab-btn py-3 px-5 border-b-2 border-transparent text-gray-400 hover:text-white flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-receipt"></i> Orders & Registrations
+                </button>
+                <button onclick="switchAdminTab('services')" id="tab-services" class="admin-tab-btn py-3 px-5 border-b-2 border-transparent text-gray-400 hover:text-white flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-dumbbell"></i> Services & Pricing
+                </button>
+                <button onclick="switchAdminTab('payments')" id="tab-payments" class="admin-tab-btn py-3 px-5 border-b-2 border-transparent text-gray-400 hover:text-white flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-wallet"></i> Payments
+                </button>
+                <button onclick="switchAdminTab('reports')" id="tab-reports" class="admin-tab-btn py-3 px-5 border-b-2 border-transparent text-gray-400 hover:text-white flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-chart-line"></i> Reports & Analytics
+                </button>
+                <button onclick="switchAdminTab('audit')" id="tab-audit" class="admin-tab-btn py-3 px-5 border-b-2 border-transparent text-gray-400 hover:text-white flex items-center gap-2 whitespace-nowrap">
+                    <i class="fa-solid fa-clock-rotate-left"></i> Audit & Backups
+                </button>
+            </div>
+
+            <!-- Metric Cards Overview -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div class="bg-cardbg border border-gray-800 p-5 rounded-2xl">
+                    <div class="text-xs text-gray-400 font-semibold uppercase">Total Revenue</div>
+                    <div id="statTotalRevenue" class="text-3xl font-heading font-extrabold text-gold-400 mt-2">₱0</div>
+                    <div class="text-[11px] text-gray-400 mt-1">Confirmed payments</div>
+                </div>
+
+                <div class="bg-cardbg border border-gray-800 p-5 rounded-2xl">
+                    <div class="text-xs text-gray-400 font-semibold uppercase">Active Members</div>
+                    <div id="statActiveMembers" class="text-3xl font-heading font-extrabold text-white mt-2">0</div>
+                    <div class="text-[11px] text-gray-400 mt-1">Current Monthly & 6-Month memberships</div>
+                </div>
+
+                <div class="bg-cardbg border border-gray-800 p-5 rounded-2xl">
+                    <div class="text-xs text-gray-400 font-semibold uppercase">Walk-ins Today</div>
+                    <div id="statWalkins" class="text-3xl font-heading font-extrabold text-white mt-2">0</div>
+                    <div class="text-[11px] text-gold-400 mt-1">₱50 / session</div>
+                </div>
+
+                <div class="bg-cardbg border border-gray-800 p-5 rounded-2xl">
+                    <div class="text-xs text-gray-400 font-semibold uppercase">Trainer Add-ons</div>
+                    <div id="statTrainers" class="text-3xl font-heading font-extrabold text-white mt-2">0</div>
+                    <div class="text-[11px] text-gray-400 mt-1">₱1,500 / mo subscribers</div>
+                </div>
+            </div>
+
+            <!-- Tab Content Dynamic Container -->
+            <div id="adminTabContent" class="space-y-6">
+                <!-- Rendered via JS -->
+            </div>
+
+        </div>
+
+    </main>
+
+    <!-- DIGITAL RECEIPT MODAL -->
+    <div id="receiptModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4 overflow-y-auto">
+        <div class="bg-cardbg border border-gray-800 rounded-3xl max-w-md w-full p-6 space-y-6 shadow-2xl relative my-8">
+            <button onclick="closeReceiptModal()" class="absolute top-4 right-4 text-gray-400 hover:text-white p-2">
+                <i class="fa-solid fa-xmark text-xl"></i>
+            </button>
+
+            <!-- Printable Receipt Box -->
+            <div id="printableReceipt" class="bg-white text-black p-6 rounded-2xl space-y-4 font-mono text-sm">
+                <div class="text-center border-b border-dashed border-gray-400 pb-4">
+                    <div class="font-extrabold text-xl tracking-wider uppercase">BIG BOZZ FITNESS GYM</div>
+                    <div class="text-xs text-gray-600">MK Tower, San Antonio, Santo Tomas, Pangasinan</div>
+                    <div class="text-xs text-gray-600">Contact: +63 966 266 9929</div>
+                    <div class="text-[10px] text-gray-500 mt-1">FB: Big Bozz Fitness Gym</div>
+                </div>
+
+                <div class="text-xs space-y-1">
+                    <div class="flex justify-between"><span>Receipt No:</span><span id="rcptNo" class="font-bold">#BB-8912</span></div>
+                    <div class="flex justify-between"><span>Date:</span><span id="rcptDate"></span></div>
+                    <div class="flex justify-between"><span>Customer:</span><span id="rcptName" class="font-bold"></span></div>
+                    <div class="flex justify-between"><span>Phone:</span><span id="rcptPhone"></span></div>
+                </div>
+
+                <div class="border-t border-b border-dashed border-gray-400 py-3 space-y-2">
+                    <div class="flex justify-between font-bold">
+                        <span>ITEM / SERVICE</span>
+                        <span>AMOUNT</span>
+                    </div>
+                    <div class="flex justify-between text-xs">
+                        <span id="rcptPlanName">Monthly Plan</span>
+                        <span id="rcptPlanPrice">₱500</span>
+                    </div>
+                    <div id="rcptTrainerRow" class="flex justify-between text-xs hidden">
+                        <span>Personal Trainer Add-on</span>
+                        <span id="rcptTrainerPrice">₱1,500</span>
+                    </div>
+                </div>
+
+                <div class="flex justify-between items-baseline text-base font-extrabold pt-1">
+                    <span>TOTAL DUE:</span>
+                    <span id="rcptTotal" class="text-lg">₱500</span>
+                </div>
+
+                <div class="text-center text-[10px] text-gray-500 border-t border-dashed border-gray-400 pt-3 space-y-1">
+                    <p>Status: UNPAID / RESERVED</p>
+                    <p>Please present this receipt at the front desk.</p>
+                    <p class="font-bold">THANK YOU FOR CHOOSING BIG BOZZ!</p>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="grid grid-cols-2 gap-3">
+                <button onclick="downloadReceiptPDF()" class="bg-gold-500 hover:bg-gold-600 text-black font-bold py-3 px-4 rounded-xl text-sm flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-file-pdf"></i> Download PDF
+                </button>
+                <button onclick="window.print()" class="border border-gray-700 hover:bg-gray-800 text-white font-bold py-3 px-4 rounded-xl text-sm flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-print"></i> Print
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div id="adminLoginModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4">
+        <div class="bg-cardbg border border-gray-800 rounded-3xl max-w-md w-full p-6 shadow-2xl">
+            <div class="flex items-center justify-between mb-6">
+                <div>
+                    <p class="text-xs uppercase tracking-widest text-gold-400 font-bold">Restricted Access</p>
+                    <h3 class="text-2xl font-heading font-bold text-white">OWNER LOGIN</h3>
+                </div>
+                <button id="closeAdminLoginModal" type="button" onclick="closeAdminLoginModal()" class="text-gray-400 hover:text-white p-2">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+
+            <form id="adminLoginForm" class="space-y-4">
+                <div>
+                    <label for="adminUsername" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Username or Email</label>
+                    <input id="adminUsername" type="text" required placeholder="owner or owner@bigbozzfitness.com" class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-gold-500 transition-colors">
+                </div>
+
+                <div>
+                    <label for="adminPassword" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Password</label>
+                    <input id="adminPassword" type="password" required placeholder="Enter admin password" class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-gold-500 transition-colors">
+                </div>
+
+                <div id="adminLoginStatus" class="text-xs text-gray-400 min-h-[20px]">Only the gym owner/admin can access this dashboard.</div>
+
+                <button type="submit" class="w-full bg-gold-500 hover:bg-gold-600 text-black py-3.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2">
+                    <i class="fa-solid fa-right-to-bracket"></i> LOGIN TO DASHBOARD
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <footer class="bg-black border-t border-gray-900 py-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row items-center justify-between gap-6">
+            <div class="flex items-center gap-3">
+                <div class="bg-gold-500 text-black p-1.5 rounded-lg font-bold font-heading text-xl">BB</div>
+                <span class="font-heading text-2xl font-bold tracking-wider text-white">BIG BOZZ FITNESS GYM</span>
+            </div>
+            <p class="text-xs text-gray-500 text-center">
+                &copy; 2026 Big Bozz Fitness Gym. MK Tower, San Antonio, Santo Tomas, Pangasinan. All rights reserved.
+            </p>
+            <div class="flex gap-4 text-gray-400 text-lg">
+                <a href="https://www.facebook.com" target="_blank" class="hover:text-gold-400"><i class="fa-brands fa-facebook"></i></a>
+                <a href="tel:+639662669929" class="hover:text-gold-400"><i class="fa-solid fa-phone"></i></a>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Custom scripts -->
+    <script src="BBFfunc.js"></script>
+</body>
+</html>

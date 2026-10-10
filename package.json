@@ -1,0 +1,27 @@
+{
+  "name": "big-bozz-fitness-admin",
+  "version": "1.0.0",
+  "description": "Big Bozz Fitness Gym admin portal with persistent member and payment records",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test",
+    "guide:pdf": "node generate-guide.js"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "better-sqlite3": "^13.0.3",
+    "dotenv": "^18.0.7",
+    "express": "^4.19.2",
+    "express-rate-limit": "^8.7.1",
+    "express-session": "^1.18.0",
+    "helmet": "^8.3.0"
+  },
+  "devDependencies": {
+    "pdfkit": "^0.20.2"
+  }
+}

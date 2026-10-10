@@ -1,0 +1,38 @@
+@import url('https://fonts.googleapis.com/css2?family=Teko:wght@500;700&family=Inter:wght@300;400;600;800&display=swap');
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #0d0e12;
+    color: #f3f4f6;
+}
+
+.font-heading {
+    font-family: 'Teko', sans-serif;
+    letter-spacing: 0.05em;
+}
+
+.glow-gold {
+    text-shadow: 0 0 15px rgba(234, 179, 8, 0.4);
+}
+
+.box-glow {
+    box-shadow: 0 0 25px rgba(234, 179, 8, 0.15);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #111318;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #2a2d37;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #ca8a04;
+}
