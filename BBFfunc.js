@@ -134,6 +134,24 @@ function requireSupabase() {
     }
 }
 
+async function adminApi(endpoint, options = {}) {
+    const headers = { Accept: 'application/json', ...(options.headers || {}) };
+    if (options.body) headers['Content-Type'] = 'application/json';
+
+    const response = await fetch(endpoint, {
+        ...options,
+        credentials: 'same-origin',
+        headers
+    });
+    if (response.status === 204) return null;
+
+    const data = await response.json();
+    if (!response.ok) {
+        throw new Error(data.message || `Request failed (${response.status}).`);
+    }
+    return data;
+}
+
 async function loadPublicPlans() {
     requireSupabase();
     const { data, error } = await supabaseClient
@@ -278,14 +296,12 @@ async function initializeAdminAccess() {
 
 async function logoutAdmin() {
     try {
-        const response = await fetch('/api/logout', {
-            method: 'POST',
-            credentials: 'same-origin'
-        });
-        if (!response.ok) throw new Error(`Logout failed (${response.status}).`);
+        requireSupabase();
+        const { error } = await supabaseClient.auth.signOut();
+        if (error) throw error;
     } catch (error) {
-        console.error('Unable to logout from the server.', error);
-        window.alert('The server could not confirm logout. Please try again.');
+        console.error('Unable to log out of Supabase.', error);
+        window.alert(error.message || 'Logout failed. Check your connection and try again.');
         return;
     }
 
@@ -315,23 +331,9 @@ function bindAdminLoginForm() {
         statusEl.className = 'text-xs text-yellow-300 min-h-[20px]';
 
         try {
-            const response = await fetch('/api/login', {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                body: JSON.stringify({ usernameOrEmail: username, password: password })
-            });
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                statusEl.textContent = data.message || 'Access denied.';
-                statusEl.className = 'text-xs text-red-300 min-h-[20px]';
-                return;
-            }
+            requireSupabase();
+            const { error } = await supabaseClient.auth.signInWithPassword({ email: username, password });
+            if (error) throw error;
 
             statusEl.textContent = 'Login successful. Opening dashboard...';
             statusEl.className = 'text-xs text-green-300 min-h-[20px]';
@@ -339,7 +341,14 @@ function bindAdminLoginForm() {
             updatePortalButtonState(true);
             await showSection('admin');
         } catch (error) {
-            statusEl.textContent = 'Unable to login right now. Please try again.';
+            console.error('Owner sign-in failed.', error);
+            if (error.message === 'Invalid login credentials') {
+                statusEl.textContent = 'That email or password is incorrect. Please check both and try again.';
+            } else if (error.name === 'AuthRetryableFetchError' || error instanceof TypeError || /network|fetch/i.test(error.message || '')) {
+                statusEl.textContent = 'Network error: Supabase could not be reached. Check your internet connection and project URL.';
+            } else {
+                statusEl.textContent = error.message || 'Sign-in failed. Check your Supabase Auth settings and try again.';
+            }
             statusEl.className = 'text-xs text-red-300 min-h-[20px]';
         }
     });
@@ -352,43 +361,65 @@ function toggleMobileMenu() {
 // Registration & Receipt Generation
 async function handleRegistrationSubmit(event) {
     event.preventDefault();
-    const name = document.getElementById('regName').value;
-    const phone = document.getElementById('regPhone').value;
+    const name = document.getElementById('regName').value.trim();
+    const phone = document.getElementById('regPhone').value.trim();
+    const email = document.getElementById('regEmail').value.trim();
+    const startDate = document.getElementById('regStartDate').value;
+    const statusEl = document.getElementById('registrationStatus');
     const calc = calculateTotal();
+
+    statusEl.textContent = 'Saving your registration...';
+    statusEl.className = 'text-sm text-yellow-300 min-h-[20px]';
 
     const dateStr = new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
 
-    let order;
     try {
-        order = await adminApi('/api/registrations', {
-            method: 'POST',
-            body: JSON.stringify({
-                name,
-                phone,
-                planKey: calc.selectedPlan,
-                trainer: calc.hasTrainer
-            })
+        requireSupabase();
+        if (!plansById.has(calc.selectedPlan)) {
+            throw new Error('This plan is unavailable right now. Please refresh the page and try again.');
+        }
+        const registrationId = crypto.randomUUID();
+        const notes = calc.hasTrainer ? 'Customer requested the personal trainer add-on.' : null;
+        const { error } = await supabaseClient.from('registrations').insert({
+            id: registrationId,
+            full_name: name,
+            contact_number: phone,
+            email: email || null,
+            plan_id: calc.selectedPlan,
+            start_date: startDate,
+            notes
         });
+        if (error) throw error;
+
+        const plan = plansById.get(calc.selectedPlan);
+        const order = {
+            receiptId: `BB-${registrationId.slice(0, 8).toUpperCase()}`,
+            name,
+            phone,
+            plan: plan.name,
+            total: calc.total,
+            trainer: calc.hasTrainer
+        };
+
+        document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
+        document.getElementById('rcptDate').textContent = dateStr;
+        document.getElementById('rcptName').textContent = order.name;
+        document.getElementById('rcptPhone').textContent = order.phone;
+        document.getElementById('rcptPlanName').textContent = order.plan;
+        document.getElementById('rcptPlanPrice').textContent = `₱${Number(plan.price).toLocaleString()}`;
+        document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
+        document.getElementById('rcptTotal').textContent = `₱${Number(order.total).toLocaleString()}`;
+
+        statusEl.textContent = 'Registration saved. Your request is pending gym confirmation.';
+        statusEl.className = 'text-sm text-green-300 min-h-[20px]';
+        document.getElementById('receiptModal').classList.remove('hidden');
     } catch (error) {
-        console.error('Unable to submit membership registration.', error);
-        window.alert(error.message);
-        return;
+        console.error('Unable to submit customer registration to Supabase.', error);
+        statusEl.textContent = error.name === 'AuthRetryableFetchError' || error instanceof TypeError
+            ? 'Network error: could not reach the registration service. Check your internet connection and try again.'
+            : error.message || 'Registration could not be saved. Please try again.';
+        statusEl.className = 'text-sm text-red-300 min-h-[20px]';
     }
-
-    document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
-    document.getElementById('rcptDate').textContent = dateStr;
-    document.getElementById('rcptName').textContent = order.name;
-    document.getElementById('rcptPhone').textContent = order.phone;
-    document.getElementById('rcptPlanName').textContent = order.plan;
-    const planPrice = order.total - (order.trainer ? PRICING.trainer : 0);
-    document.getElementById('rcptPlanPrice').textContent = `₱${planPrice.toLocaleString()}`;
-    document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
-    document.getElementById('rcptTotal').textContent = `₱${order.total.toLocaleString()}`;
-
-    customersData.unshift(order);
-
-    document.getElementById('receiptModal').classList.remove('hidden');
-    updateAdminStats();
 }
 
 function closeReceiptModal() {
@@ -977,9 +1008,18 @@ function initChart() {
 }
 
 // Initialize default state on load
-window.onload = function () {
+window.addEventListener('load', async function () {
     bindAdminLoginForm();
-    initializeAdminAccess();
     calculateTotal();
-    scheduleMemberDailyRefresh();
-};
+    const today = new Date();
+    document.getElementById('regStartDate').value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    try {
+        await loadPublicPlans();
+    } catch (error) {
+        console.error('Unable to load public plans from Supabase.', error);
+        const statusEl = document.getElementById('registrationStatus');
+        statusEl.textContent = 'Plans could not be loaded from the registration service. Please try again later.';
+        statusEl.className = 'text-sm text-red-300 min-h-[20px]';
+    }
+    await initializeAdminAccess();
+});
