@@ -198,6 +198,14 @@ async function loadAdminRegistrations() {
 
 function renderAdminRegistrations(registrations) {
     const container = document.getElementById('adminRegistrations');
+    document.getElementById('statRegistrationTotal').textContent = registrations.length;
+    document.getElementById('statRegistrationPending').textContent =
+        registrations.filter(registration => registration.status === 'pending').length;
+    document.getElementById('statRegistrationConfirmed').textContent =
+        registrations.filter(registration => registration.status === 'confirmed').length;
+    document.getElementById('statRegistrationCancelled').textContent =
+        registrations.filter(registration => registration.status === 'cancelled').length;
+
     const rows = registrations.map(registration => {
         const plan = registration.plans;
         const statusOptions = ['pending', 'confirmed', 'cancelled'].map(status => `
@@ -254,6 +262,7 @@ async function updateRegistrationStatus(id, status) {
     try {
         const { error } = await supabaseClient.from('registrations').update({ status }).eq('id', id);
         if (error) throw error;
+        await loadAdminRegistrations();
         statusEl.textContent = 'Registration status updated.';
         statusEl.className = 'text-sm text-green-300';
     } catch (error) {
