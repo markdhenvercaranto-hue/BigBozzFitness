@@ -5,16 +5,9 @@ const PRICING = {
     '6month': { name: '6-Month Plan (₱450/mo)', price: 2700, duration: '6 Months' },
     trainer: 1500
 };
-const supabaseConfig = window.BBF_SUPABASE_CONFIG || {};
-const supabaseClient = window.supabase?.createClient &&
-    supabaseConfig.url && !supabaseConfig.url.includes('YOUR_') &&
-    supabaseConfig.anonKey && !supabaseConfig.anonKey.includes('YOUR_')
-    ? window.supabase.createClient(supabaseConfig.url, supabaseConfig.anonKey)
-    : null;
 
 let customersData = [];
 let membersData = [];
-let plansById = new Map();
 let editingMemberId = null;
 let memberRefreshTimeout;
 let adminDataLoaded = false;
@@ -59,14 +52,20 @@ function scrollToCalculator() {
 }
 
 async function getAdminSessionState() {
-    if (!supabaseClient) return { authenticated: false, user: null };
     try {
-        const { data, error } = await supabaseClient.auth.getSession();
-        if (error) throw error;
-        const user = data.session?.user || null;
-        return { authenticated: !!user, user };
+        const response = await fetch('/api/session', {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (!response.ok) {
+            return { authenticated: false, user: null };
+        }
+
+        const data = await response.json();
+        return { authenticated: !!data.authenticated, user: data.user || null };
     } catch (error) {
-        console.error('Unable to check Supabase login session.', error);
         return { authenticated: false, user: null };
     }
 }
@@ -109,8 +108,7 @@ async function showSection(view) {
     if (view === 'public') {
         document.getElementById('publicView').classList.remove('hidden');
         document.getElementById('adminView').classList.add('hidden');
-        const session = await getAdminSessionState();
-        updatePortalButtonState(session.authenticated);
+        updatePortalButtonState(false);
         return;
     }
 
@@ -124,13 +122,15 @@ async function showSection(view) {
         document.getElementById('publicView').classList.add('hidden');
         document.getElementById('adminView').classList.remove('hidden');
         updatePortalButtonState(true);
-        await loadAdminRegistrations();
-    }
-}
-
-function requireSupabase() {
-    if (!supabaseClient) {
-        throw new Error('Supabase is not configured. Add your project URL and anon key in BBFIndex.html.');
+        try {
+            await loadAdminData();
+            adminDataLoaded = true;
+            updateAdminStats();
+        } catch (error) {
+            showAdminDataError(error);
+            return;
+        }
+        renderAdminTabContent();
     }
 }
 
@@ -152,141 +152,51 @@ async function adminApi(endpoint, options = {}) {
     return data;
 }
 
-async function loadPublicPlans() {
-    requireSupabase();
-    const { data, error } = await supabaseClient
-        .from('plans')
-        .select('id,name,price,duration,description');
-    if (error) throw error;
+async function loadAdminData() {
+    const [serverMembers, orders] = await Promise.all([
+        adminApi('/api/admin/members'),
+        adminApi('/api/admin/orders')
+    ]);
 
-    plansById = new Map(data.map(plan => [plan.id, plan]));
-    for (const id of ['walkin', 'monthly', '6month']) {
-        const plan = plansById.get(id);
-        if (plan) PRICING[id] = { name: plan.name, price: Number(plan.price), duration: plan.duration };
-    }
-}
+    membersData = serverMembers;
+    customersData = orders;
 
-async function loadAdminRegistrations() {
-    const container = document.getElementById('adminRegistrations');
-    const status = document.getElementById('adminStatus');
-    if (!container || !status) return;
-    container.innerHTML = '<div class="p-8 text-center text-gray-400">Loading registrations...</div>';
-    status.textContent = '';
-
+    let legacyMembers;
     try {
-        requireSupabase();
-        const { data, error } = await supabaseClient
-            .from('registrations')
-            .select('id,full_name,contact_number,email,plan_id,start_date,status,notes,created_at,plans(name,price,duration)')
-            .order('created_at', { ascending: false });
-        if (error) throw error;
-        renderAdminRegistrations(data);
+        const stored = localStorage.getItem('bbf-members');
+        legacyMembers = stored ? JSON.parse(stored) : null;
     } catch (error) {
-        console.error('Unable to load registrations from Supabase.', error);
-        const message = error.message || 'The request failed. Check your connection and Supabase settings.';
-        const missingTable = error.code === 'PGRST205' ||
-            /could not find the table .*registrations|schema cache/i.test(message);
-        container.innerHTML = missingTable
-            ? '<div class="p-8 text-center text-red-300">The registrations table has not been created in this Supabase project. Run the setup SQL in supabase-setup.sql from the Supabase SQL Editor, then reload this page.</div>'
-            : '<div class="p-8 text-center text-red-300">Could not load registrations. Check Supabase configuration and owner access, then try again.</div>';
-        status.textContent = missingTable
-            ? 'Setup needed: run supabase-setup.sql in the SQL Editor of the Supabase project connected to this site.'
-            : message;
-        status.className = 'text-sm text-red-300';
+        console.error('Unable to read legacy browser member records.', error);
+        throw new Error('Could not safely read saved member data from this browser.');
+    }
+
+    if (Array.isArray(legacyMembers) && legacyMembers.length) {
+        const migrationResult = await adminApi('/api/admin/members/import-legacy', {
+            method: 'POST',
+            body: JSON.stringify({ members: legacyMembers })
+        });
+        membersData = migrationResult.members;
+    }
+
+    if (legacyMembers) {
+        try {
+            localStorage.removeItem('bbf-members');
+        } catch (error) {
+            console.error('Unable to clear migrated browser member records.', error);
+        }
     }
 }
 
-function renderAdminRegistrations(registrations) {
-    const container = document.getElementById('adminRegistrations');
-    document.getElementById('statRegistrationTotal').textContent = registrations.length;
-    document.getElementById('statRegistrationPending').textContent =
-        registrations.filter(registration => registration.status === 'pending').length;
-    document.getElementById('statRegistrationConfirmed').textContent =
-        registrations.filter(registration => registration.status === 'confirmed').length;
-    document.getElementById('statRegistrationCancelled').textContent =
-        registrations.filter(registration => registration.status === 'cancelled').length;
-
-    const rows = registrations.map(registration => {
-        const plan = registration.plans;
-        const statusOptions = ['pending', 'confirmed', 'cancelled'].map(status => `
-            <option value="${status}" ${registration.status === status ? 'selected' : ''}>${status}</option>
-        `).join('');
-        return `
-            <tr class="border-t border-gray-800/60 align-top">
-                <td class="p-4">
-                    <div class="font-semibold text-white">${escapeHtml(registration.full_name)}</div>
-                    <div class="text-xs text-gray-400">${escapeHtml(registration.contact_number)}</div>
-                    <div class="text-xs text-gray-500">${escapeHtml(registration.email || '')}</div>
-                    ${registration.notes ? `<div class="text-xs text-gold-400 mt-1">${escapeHtml(registration.notes)}</div>` : ''}
-                </td>
-                <td class="p-4 text-gray-300">${escapeHtml(plan?.name || 'Unknown plan')}<div class="text-xs text-gray-500">${plan ? `₱${Number(plan.price).toLocaleString()} / ${escapeHtml(plan.duration)}` : ''}</div></td>
-                <td class="p-4 whitespace-nowrap text-gray-300">${escapeHtml(registration.start_date)}</td>
-                <td class="p-4">
-                    <select data-registration-status="${escapeHtml(registration.id)}" aria-label="Change status for ${escapeHtml(registration.full_name)}" class="bg-black/60 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm">
-                        ${statusOptions}
-                    </select>
-                </td>
-                <td class="p-4">
-                    <button type="button" data-registration-delete="${escapeHtml(registration.id)}" class="border border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500 hover:text-white px-3 py-2 rounded-lg text-xs font-semibold">Delete</button>
-                </td>
-            </tr>
-        `;
-    }).join('');
-
+function showAdminDataError(error) {
+    console.error('Unable to load dashboard records.', error);
+    const container = document.getElementById('adminTabContent');
     container.innerHTML = `
-        <div class="p-4 border-b border-gray-800 flex items-center justify-between">
-            <h2 class="font-bold text-white">Customer Registrations</h2>
-            <span class="text-xs text-gray-400">${registrations.length} total</span>
-        </div>
-        <div class="overflow-x-auto">
-            <table class="w-full text-left text-sm">
-                <thead class="bg-black/40 text-xs uppercase text-gray-400">
-                    <tr><th class="p-4">Customer</th><th class="p-4">Plan</th><th class="p-4">Start date</th><th class="p-4">Status</th><th class="p-4">Action</th></tr>
-                </thead>
-                <tbody>${rows || '<tr><td colspan="5" class="p-8 text-center text-gray-400">No registrations yet.</td></tr>'}</tbody>
-            </table>
+        <div role="alert" class="bg-red-500/10 border border-red-500/30 text-red-200 p-5 rounded-2xl">
+            <p class="font-bold">Dashboard data could not be loaded.</p>
+            <p class="text-sm mt-1">${escapeHtml(error.message)}</p>
+            <button onclick="showSection('admin')" class="mt-3 border border-red-500/40 px-3 py-1.5 rounded-lg text-xs font-semibold hover:bg-red-500/20">Try again</button>
         </div>
     `;
-
-    container.querySelectorAll('[data-registration-status]').forEach(select => {
-        select.addEventListener('change', () => updateRegistrationStatus(select.dataset.registrationStatus, select.value));
-    });
-    container.querySelectorAll('[data-registration-delete]').forEach(button => {
-        button.addEventListener('click', () => deleteRegistration(button.dataset.registrationDelete));
-    });
-}
-
-async function updateRegistrationStatus(id, status) {
-    if (!['pending', 'confirmed', 'cancelled'].includes(status)) return;
-    const statusEl = document.getElementById('adminStatus');
-    try {
-        const { error } = await supabaseClient.from('registrations').update({ status }).eq('id', id);
-        if (error) throw error;
-        await loadAdminRegistrations();
-        statusEl.textContent = 'Registration status updated.';
-        statusEl.className = 'text-sm text-green-300';
-    } catch (error) {
-        console.error('Unable to update registration status.', error);
-        statusEl.textContent = error.message || 'Could not update the registration. Check your connection and owner access.';
-        statusEl.className = 'text-sm text-red-300';
-        await loadAdminRegistrations();
-    }
-}
-
-async function deleteRegistration(id) {
-    if (!window.confirm('Delete this registration? This cannot be undone.')) return;
-    const statusEl = document.getElementById('adminStatus');
-    try {
-        const { error } = await supabaseClient.from('registrations').delete().eq('id', id);
-        if (error) throw error;
-        statusEl.textContent = 'Registration deleted.';
-        statusEl.className = 'text-sm text-green-300';
-        await loadAdminRegistrations();
-    } catch (error) {
-        console.error('Unable to delete registration.', error);
-        statusEl.textContent = error.message || 'Could not delete the registration. Check your connection and owner access.';
-        statusEl.className = 'text-sm text-red-300';
-    }
 }
 
 async function togglePortal() {
@@ -307,17 +217,23 @@ async function togglePortal() {
 async function initializeAdminAccess() {
     const session = await getAdminSessionState();
     updatePortalButtonState(session.authenticated);
-    if (session.authenticated) await showSection('admin');
+    if (!session.authenticated) {
+        showSection('public');
+    } else {
+        showSection('admin');
+    }
 }
 
 async function logoutAdmin() {
     try {
-        requireSupabase();
-        const { error } = await supabaseClient.auth.signOut();
-        if (error) throw error;
+        const response = await fetch('/api/logout', {
+            method: 'POST',
+            credentials: 'same-origin'
+        });
+        if (!response.ok) throw new Error(`Logout failed (${response.status}).`);
     } catch (error) {
-        console.error('Unable to log out of Supabase.', error);
-        window.alert(error.message || 'Logout failed. Check your connection and try again.');
+        console.error('Unable to logout from the server.', error);
+        window.alert('The server could not confirm logout. Please try again.');
         return;
     }
 
@@ -347,9 +263,23 @@ function bindAdminLoginForm() {
         statusEl.className = 'text-xs text-yellow-300 min-h-[20px]';
 
         try {
-            requireSupabase();
-            const { error } = await supabaseClient.auth.signInWithPassword({ email: username, password });
-            if (error) throw error;
+            const response = await fetch('/api/login', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json'
+                },
+                body: JSON.stringify({ usernameOrEmail: username, password: password })
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                statusEl.textContent = data.message || 'Access denied.';
+                statusEl.className = 'text-xs text-red-300 min-h-[20px]';
+                return;
+            }
 
             statusEl.textContent = 'Login successful. Opening dashboard...';
             statusEl.className = 'text-xs text-green-300 min-h-[20px]';
@@ -357,14 +287,7 @@ function bindAdminLoginForm() {
             updatePortalButtonState(true);
             await showSection('admin');
         } catch (error) {
-            console.error('Owner sign-in failed.', error);
-            if (error.message === 'Invalid login credentials') {
-                statusEl.textContent = 'That email or password is incorrect. Please check both and try again.';
-            } else if (error.name === 'AuthRetryableFetchError' || error instanceof TypeError || /network|fetch/i.test(error.message || '')) {
-                statusEl.textContent = 'Network error: Supabase could not be reached. Check your internet connection and project URL.';
-            } else {
-                statusEl.textContent = error.message || 'Sign-in failed. Check your Supabase Auth settings and try again.';
-            }
+            statusEl.textContent = 'Unable to login right now. Please try again.';
             statusEl.className = 'text-xs text-red-300 min-h-[20px]';
         }
     });
@@ -377,65 +300,43 @@ function toggleMobileMenu() {
 // Registration & Receipt Generation
 async function handleRegistrationSubmit(event) {
     event.preventDefault();
-    const name = document.getElementById('regName').value.trim();
-    const phone = document.getElementById('regPhone').value.trim();
-    const email = document.getElementById('regEmail').value.trim();
-    const startDate = document.getElementById('regStartDate').value;
-    const statusEl = document.getElementById('registrationStatus');
+    const name = document.getElementById('regName').value;
+    const phone = document.getElementById('regPhone').value;
     const calc = calculateTotal();
-
-    statusEl.textContent = 'Saving your registration...';
-    statusEl.className = 'text-sm text-yellow-300 min-h-[20px]';
 
     const dateStr = new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
 
+    let order;
     try {
-        requireSupabase();
-        if (!plansById.has(calc.selectedPlan)) {
-            throw new Error('This plan is unavailable right now. Please refresh the page and try again.');
-        }
-        const registrationId = crypto.randomUUID();
-        const notes = calc.hasTrainer ? 'Customer requested the personal trainer add-on.' : null;
-        const { error } = await supabaseClient.from('registrations').insert({
-            id: registrationId,
-            full_name: name,
-            contact_number: phone,
-            email: email || null,
-            plan_id: calc.selectedPlan,
-            start_date: startDate,
-            notes
+        order = await adminApi('/api/registrations', {
+            method: 'POST',
+            body: JSON.stringify({
+                name,
+                phone,
+                planKey: calc.selectedPlan,
+                trainer: calc.hasTrainer
+            })
         });
-        if (error) throw error;
-
-        const plan = plansById.get(calc.selectedPlan);
-        const order = {
-            receiptId: `BB-${registrationId.slice(0, 8).toUpperCase()}`,
-            name,
-            phone,
-            plan: plan.name,
-            total: calc.total,
-            trainer: calc.hasTrainer
-        };
-
-        document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
-        document.getElementById('rcptDate').textContent = dateStr;
-        document.getElementById('rcptName').textContent = order.name;
-        document.getElementById('rcptPhone').textContent = order.phone;
-        document.getElementById('rcptPlanName').textContent = order.plan;
-        document.getElementById('rcptPlanPrice').textContent = `₱${Number(plan.price).toLocaleString()}`;
-        document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
-        document.getElementById('rcptTotal').textContent = `₱${Number(order.total).toLocaleString()}`;
-
-        statusEl.textContent = 'Registration saved. Your request is pending gym confirmation.';
-        statusEl.className = 'text-sm text-green-300 min-h-[20px]';
-        document.getElementById('receiptModal').classList.remove('hidden');
     } catch (error) {
-        console.error('Unable to submit customer registration to Supabase.', error);
-        statusEl.textContent = error.name === 'AuthRetryableFetchError' || error instanceof TypeError
-            ? 'Network error: could not reach the registration service. Check your internet connection and try again.'
-            : error.message || 'Registration could not be saved. Please try again.';
-        statusEl.className = 'text-sm text-red-300 min-h-[20px]';
+        console.error('Unable to submit membership registration.', error);
+        window.alert(error.message);
+        return;
     }
+
+    document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
+    document.getElementById('rcptDate').textContent = dateStr;
+    document.getElementById('rcptName').textContent = order.name;
+    document.getElementById('rcptPhone').textContent = order.phone;
+    document.getElementById('rcptPlanName').textContent = order.plan;
+    const planPrice = order.total - (order.trainer ? PRICING.trainer : 0);
+    document.getElementById('rcptPlanPrice').textContent = `₱${planPrice.toLocaleString()}`;
+    document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
+    document.getElementById('rcptTotal').textContent = `₱${order.total.toLocaleString()}`;
+
+    customersData.unshift(order);
+
+    document.getElementById('receiptModal').classList.remove('hidden');
+    updateAdminStats();
 }
 
 function closeReceiptModal() {
@@ -1024,18 +925,9 @@ function initChart() {
 }
 
 // Initialize default state on load
-window.addEventListener('load', async function () {
+window.onload = function () {
     bindAdminLoginForm();
+    initializeAdminAccess();
     calculateTotal();
-    const today = new Date();
-    document.getElementById('regStartDate').value = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    try {
-        await loadPublicPlans();
-    } catch (error) {
-        console.error('Unable to load public plans from Supabase.', error);
-        const statusEl = document.getElementById('registrationStatus');
-        statusEl.textContent = 'Plans could not be loaded from the registration service. Please try again later.';
-        statusEl.className = 'text-sm text-red-300 min-h-[20px]';
-    }
-    await initializeAdminAccess();
-});
+    scheduleMemberDailyRefresh();
+};
