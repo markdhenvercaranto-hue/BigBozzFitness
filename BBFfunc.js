@@ -183,8 +183,15 @@ async function loadAdminRegistrations() {
         renderAdminRegistrations(data);
     } catch (error) {
         console.error('Unable to load registrations from Supabase.', error);
-        container.innerHTML = '<div class="p-8 text-center text-red-300">Could not load registrations. Check Supabase configuration and owner access, then try again.</div>';
-        status.textContent = error.message || 'The request failed. Check your connection and Supabase settings.';
+        const message = error.message || 'The request failed. Check your connection and Supabase settings.';
+        const missingTable = error.code === 'PGRST205' ||
+            /could not find the table .*registrations|schema cache/i.test(message);
+        container.innerHTML = missingTable
+            ? '<div class="p-8 text-center text-red-300">The registrations table has not been created in this Supabase project. Run the setup SQL in supabase-setup.sql from the Supabase SQL Editor, then reload this page.</div>'
+            : '<div class="p-8 text-center text-red-300">Could not load registrations. Check Supabase configuration and owner access, then try again.</div>';
+        status.textContent = missingTable
+            ? 'Setup needed: run supabase-setup.sql in the SQL Editor of the Supabase project connected to this site.'
+            : message;
         status.className = 'text-sm text-red-300';
     }
 }

@@ -1,6 +1,6 @@
 -- Before running this script:
 -- 1. Create the owner in Supabase Authentication > Users.
--- 2. Replace OWNER_EMAIL_HERE below with that user's exact email address.
+-- 2. This policy is restricted to owner@bigbozzfitness.com.
 -- 3. Disable public sign-ups in Authentication settings.
 
 create table if not exists public.plans (
@@ -53,15 +53,15 @@ drop policy if exists "Owner can view registrations" on public.registrations;
 create policy "Owner can view registrations"
 on public.registrations for select
 to authenticated
-using (lower(coalesce(auth.jwt() ->> 'email', '')) = lower('OWNER_EMAIL_HERE'));
+using (lower(coalesce(auth.jwt() ->> 'email', '')) = lower('owner@bigbozzfitness.com'));
 
 drop policy if exists "Owner can change registration status" on public.registrations;
 create policy "Owner can change registration status"
 on public.registrations for update
 to authenticated
-using (lower(coalesce(auth.jwt() ->> 'email', '')) = lower('OWNER_EMAIL_HERE'))
+using (lower(coalesce(auth.jwt() ->> 'email', '')) = lower('owner@bigbozzfitness.com'))
 with check (
-    lower(coalesce(auth.jwt() ->> 'email', '')) = lower('OWNER_EMAIL_HERE')
+    lower(coalesce(auth.jwt() ->> 'email', '')) = lower('owner@bigbozzfitness.com')
     and status in ('pending', 'confirmed', 'cancelled')
 );
 
@@ -69,7 +69,7 @@ drop policy if exists "Owner can delete registrations" on public.registrations;
 create policy "Owner can delete registrations"
 on public.registrations for delete
 to authenticated
-using (lower(coalesce(auth.jwt() ->> 'email', '')) = lower('OWNER_EMAIL_HERE'));
+using (lower(coalesce(auth.jwt() ->> 'email', '')) = lower('owner@bigbozzfitness.com'));
 
 revoke all on table public.plans from public, anon, authenticated;
 revoke all on table public.registrations from public, anon, authenticated;
