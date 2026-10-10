@@ -7,4 +7,3 @@ npm-debug.log*
 *.sqlite-shm
 *.sqlite-wal
 backups/
-netlify-dist/
