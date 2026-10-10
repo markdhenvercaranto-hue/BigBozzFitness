@@ -12,6 +12,7 @@ let membersData = [];
 let editingMemberId = null;
 let memberRefreshTimeout;
 let adminDataLoaded = false;
+let adminUnlocked = false;
 
 let currentAdminTab = 'customers';
 let revenueChart;
@@ -81,7 +82,8 @@ async function getAdminSessionState() {
 function updatePortalButtonState(isAuthenticated) {
     const portalBtnText = document.getElementById('portalBtnText');
     if (portalBtnText) {
-        portalBtnText.textContent = isAuthenticated ? 'Admin Dashboard' : 'Owner Login';
+        const dashboardVisible = !document.getElementById('adminView').classList.contains('hidden');
+        portalBtnText.textContent = dashboardVisible ? 'Public Website' : 'Admin Dashboard';
     }
 }
 
@@ -89,9 +91,9 @@ function openAdminLoginModal() {
     const modal = document.getElementById('adminLoginModal');
     if (modal) {
         modal.classList.remove('hidden');
-        const usernameInput = document.getElementById('adminUsername');
-        if (usernameInput) {
-            setTimeout(() => usernameInput.focus(), 100);
+        const codeInput = document.getElementById('adminCode');
+        if (codeInput) {
+            setTimeout(() => codeInput.focus(), 100);
         }
     }
 }
@@ -103,7 +105,7 @@ function closeAdminLoginModal() {
     }
     const statusEl = document.getElementById('adminLoginStatus');
     if (statusEl) {
-        statusEl.textContent = 'Only the gym owner/admin can access this dashboard.';
+        statusEl.textContent = 'Only enter this code on a device you trust. The dashboard summary remains public.';
         statusEl.className = 'text-xs text-gray-400 min-h-[20px]';
     }
     const form = document.getElementById('adminLoginForm');
@@ -116,20 +118,23 @@ async function showSection(view) {
     if (view === 'public') {
         document.getElementById('publicView').classList.remove('hidden');
         document.getElementById('adminView').classList.add('hidden');
-        updatePortalButtonState(false);
+        updatePortalButtonState(adminUnlocked);
         return;
     }
 
     if (view === 'admin') {
         const session = await getAdminSessionState();
-        if (!session.authenticated) {
-            openAdminLoginModal();
-            return;
-        }
-
         document.getElementById('publicView').classList.add('hidden');
         document.getElementById('adminView').classList.remove('hidden');
-        updatePortalButtonState(true);
+        adminUnlocked = session.authenticated;
+        updatePortalButtonState(adminUnlocked);
+        document.getElementById('adminTabNavigation').classList.toggle('hidden', !adminUnlocked);
+        document.getElementById('adminActions').classList.toggle('hidden', !adminUnlocked);
+        document.getElementById('adminCodeButton').classList.toggle('hidden', adminUnlocked);
+        if (!adminUnlocked) {
+            await renderPublicDashboardOverview();
+            return;
+        }
         try {
             await loadAdminData();
             adminDataLoaded = true;
@@ -139,6 +144,34 @@ async function showSection(view) {
             return;
         }
         renderAdminTabContent();
+    }
+}
+
+async function renderPublicDashboardOverview() {
+    const container = document.getElementById('adminTabContent');
+    container.innerHTML = `
+        <section class="bg-cardbg border border-gray-800 rounded-2xl p-6 space-y-3">
+            <h2 class="text-xl font-bold text-white">Gym overview</h2>
+            <p class="text-sm text-gray-400">This is a read-only summary. Customer details, member records, payments, and admin tools are available only after entering the admin code.</p>
+            <button onclick="openAdminLoginModal()" class="bg-gold-500 hover:bg-gold-600 text-black px-4 py-2.5 rounded-xl font-bold text-sm">
+                <i class="fa-solid fa-key mr-1"></i> Enter admin code to manage the dashboard
+            </button>
+        </section>
+    `;
+    try {
+        const response = await fetch('/api/dashboard/overview', {
+            headers: { Accept: 'application/json' },
+            credentials: 'same-origin'
+        });
+        const overview = await response.json();
+        if (!response.ok) throw new Error(overview.message || 'Could not load the public dashboard summary.');
+        document.getElementById('statTotalRevenue').textContent = `₱${Number(overview.totalRevenue).toLocaleString()}`;
+        document.getElementById('statActiveMembers').textContent = Number(overview.activeMembers).toLocaleString();
+        document.getElementById('statWalkins').textContent = Number(overview.walkinsToday).toLocaleString();
+        document.getElementById('statTrainers').textContent = Number(overview.trainerCount).toLocaleString();
+    } catch (error) {
+        console.error('Unable to load public dashboard overview.', error);
+        container.insertAdjacentHTML('beforeend', `<p role="alert" class="text-sm text-red-300">${escapeHtml(error.message)}</p>`);
     }
 }
 
@@ -215,12 +248,6 @@ function showAdminDataError(error) {
 }
 
 async function togglePortal() {
-    const session = await getAdminSessionState();
-    if (!session.authenticated) {
-        openAdminLoginModal();
-        return;
-    }
-
     const isAdminVisible = !document.getElementById('adminView').classList.contains('hidden');
     if (isAdminVisible) {
         showSection('public');
@@ -231,7 +258,8 @@ async function togglePortal() {
 
 async function initializeAdminAccess() {
     const session = await getAdminSessionState();
-    updatePortalButtonState(session.authenticated);
+    adminUnlocked = session.authenticated;
+    updatePortalButtonState(adminUnlocked);
     if (!session.authenticated) {
         showSection('public');
     } else {
@@ -253,8 +281,8 @@ async function logoutAdmin() {
     }
 
     closeAdminLoginModal();
-    showSection('public');
-    updatePortalButtonState(false);
+    adminUnlocked = false;
+    await showSection('admin');
 }
 
 function bindAdminLoginForm() {
@@ -264,12 +292,11 @@ function bindAdminLoginForm() {
     form.addEventListener('submit', async function (event) {
         event.preventDefault();
 
-        const username = document.getElementById('adminUsername').value.trim();
-        const password = document.getElementById('adminPassword').value;
+        const code = document.getElementById('adminCode').value;
         const statusEl = document.getElementById('adminLoginStatus');
 
-        if (!username || !password) {
-            statusEl.textContent = 'Please enter both username/email and password.';
+        if (!code) {
+            statusEl.textContent = 'Enter the admin code to unlock dashboard controls.';
             statusEl.className = 'text-xs text-red-300 min-h-[20px]';
             return;
         }
@@ -278,14 +305,14 @@ function bindAdminLoginForm() {
         statusEl.className = 'text-xs text-yellow-300 min-h-[20px]';
 
         try {
-            const response = await fetch('/api/login', {
+            const response = await fetch('/api/admin/unlock', {
                 method: 'POST',
                 credentials: 'same-origin',
                 headers: {
                     'Content-Type': 'application/json',
                     'Accept': 'application/json'
                 },
-                body: JSON.stringify({ usernameOrEmail: username, password: password })
+                body: JSON.stringify({ code })
             });
 
             const data = await response.json();
@@ -296,10 +323,10 @@ function bindAdminLoginForm() {
                 return;
             }
 
-            statusEl.textContent = 'Login successful. Opening dashboard...';
+            statusEl.textContent = 'Admin controls unlocked. Opening dashboard...';
             statusEl.className = 'text-xs text-green-300 min-h-[20px]';
             closeAdminLoginModal();
-            updatePortalButtonState(true);
+            adminUnlocked = true;
             await showSection('admin');
         } catch (error) {
             statusEl.textContent = 'Unable to login right now. Please try again.';

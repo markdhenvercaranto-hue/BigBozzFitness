@@ -132,6 +132,13 @@ test('authenticated member, order, audit, and backup workflows persist', async t
   const unauthenticatedMembers = await request('/api/admin/members');
   assert.equal(unauthenticatedMembers.status, 401);
   assert.equal(unauthenticatedMembers.headers.get('cache-control'), 'no-store');
+  const publicOverview = await request('/api/dashboard/overview');
+  assert.equal(publicOverview.status, 200);
+  const publicSummary = await publicOverview.json();
+  assert.deepEqual(Object.keys(publicSummary).sort(), [
+    'activeMembers', 'totalRevenue', 'trainerCount', 'walkinsToday'
+  ]);
+  assert.equal(JSON.stringify(publicSummary).includes('@'), false);
   for (const [route, method] of [
     ['/api/admin/stats', 'GET'],
     ['/api/admin/members', 'GET'],
@@ -170,6 +177,21 @@ test('authenticated member, order, audit, and backup workflows persist', async t
     body: JSON.stringify({ usernameOrEmail: 'owner', password: 'wrong-password' })
   });
   assert.equal(badLogin.status, 401);
+  const badAdminCode = await request('/api/admin/unlock', {
+    method: 'POST',
+    body: JSON.stringify({ code: 'wrong-admin-code' })
+  });
+  assert.equal(badAdminCode.status, 401);
+  const adminCodeUnlock = await request('/api/admin/unlock', {
+    method: 'POST',
+    body: JSON.stringify({ code: 'AnExamplePassword123' })
+  });
+  assert.equal(adminCodeUnlock.status, 200);
+  cookie = adminCodeUnlock.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  assert.equal((await request('/api/admin/members')).status, 200);
+  const codeUnlockLogout = await request('/api/logout', { method: 'POST' });
+  assert.equal(codeUnlockLogout.status, 200);
+  cookie = undefined;
 
   const login = await request('/api/login', {
     method: 'POST',

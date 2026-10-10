@@ -22,13 +22,13 @@ npm ci
 npm start
 ```
 
-Open `http://localhost:3000` in a browser, select **Owner Login**, and use the username and password you set in the private `.env` file. Leave the server terminal running while using the dashboard. Stop it with Ctrl+C when finished.
+Open `http://localhost:3000` in a browser. The Admin Dashboard opens in public read-only summary mode. Select **Enter Admin Code** and enter the current administrator password to unlock member records and management tools. Keep the server terminal running while using the dashboard. Stop it with Ctrl+C when finished.
 
 On Windows, the database and backups are stored under `%LOCALAPPDATA%\BigBozzFitness`, outside the OneDrive-synced website folder and outside the public web root. On other systems the default is a private sibling folder. Set `DATA_DIR` in the environment file only if you need a different private location; it must remain outside the application directory. `ENV_FILE` can point to an alternate configuration file.
 
 ## 2. Register and manage members
 
-Open the admin dashboard and select **Members**.
+Open the admin dashboard, enter the admin code, and select **Members**. Visitors without the code can see aggregate dashboard metrics only; names, contact details, registrations, payments, audit history, and all management controls remain protected.
 
 - **Register a Member** creates a membership directly for an in-person registration. Enter the name, optionally enter a phone number, choose Monthly or 6-Month, and set the start date. The server calculates the end date.
 - The list shows the current membership period, remaining days, and status. End dates count as active through that calendar day; a membership becomes expired the following day. Expiration and the Active Members count refresh at local midnight.
@@ -66,7 +66,7 @@ When updating an existing installation, make a separate database backup before s
 
 **Audit & Backups** shows recent member, payment, and backup events, including before/after membership dates for edits and renewals. The log is restricted to the admin dashboard.
 
-Open **Security** to change the administrator password. The current password is verified and new passwords must be at least 12 characters. Failed login attempts are recorded without passwords. State-changing admin requests must come from the same origin and include the app's custom request header; the dashboard sends this automatically.
+Open **Security** to change the administrator password (the admin code). The current password is verified and new passwords must be at least 12 characters. Failed code attempts are recorded without passwords. State-changing admin requests must come from the same origin and include the app's custom request header; the dashboard sends this automatically.
 
 - **Export Data** downloads a CSV containing the current member list and order history.
 - **Create Backup** creates a SQLite backup, downloads a copy to the admin's browser, and keeps the server copy under `%LOCALAPPDATA%\BigBozzFitness\backups` (or `DATA_DIR\backups` if configured).

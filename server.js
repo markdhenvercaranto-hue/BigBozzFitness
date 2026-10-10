@@ -217,6 +217,14 @@ function createApplication(options = {}) {
     }
   });
 
+  app.get('/api/dashboard/overview', (req, res) => {
+    try {
+      return res.set('Cache-Control', 'no-store').json(database.publicOverview(getTodayDateString()));
+    } catch (error) {
+      return respondWithError(res, error);
+    }
+  });
+
   function isAuthenticated(req, res, next) {
     if (req.session && req.session.isAuthenticated) return next();
     return res.status(401).json({ message: 'Unauthorized: admin access required.' });
@@ -256,6 +264,28 @@ function createApplication(options = {}) {
         return req.session.save(saveError => {
           if (saveError) return next(saveError);
           return res.json({ success: true, user: req.session.user, message: 'Admin login successful.' });
+        });
+      });
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.post('/api/admin/unlock', loginLimiter, async (req, res, next) => {
+    try {
+      const code = typeof req.body.code === 'string' ? req.body.code : '';
+      const isValidCode = await bcrypt.compare(code, database.getAdminPasswordHash());
+      if (!isValidCode) {
+        database.recordFailedLogin('admin-code');
+        return res.status(401).json({ message: 'Invalid admin code.' });
+      }
+      return req.session.regenerate(error => {
+        if (error) return next(error);
+        req.session.isAuthenticated = true;
+        req.session.user = { username: adminUsername, email: adminEmail, role: 'owner' };
+        return req.session.save(saveError => {
+          if (saveError) return next(saveError);
+          return res.json({ success: true, user: req.session.user, message: 'Admin controls unlocked.' });
         });
       });
     } catch (error) {

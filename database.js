@@ -229,9 +229,19 @@ function createDatabase(dataDirectory) {
     return transaction();
   }
 
+  function publicOverview(today) {
+    return {
+      totalRevenue: statements.paidRevenue.get().total,
+      activeMembers: statements.activeCount.get(today).count,
+      walkinsToday: statements.walkinsToday.get(today).count,
+      trainerCount: statements.trainerCount.get().count
+    };
+  }
+
   return {
     createMember,
     listMembers: () => statements.listMembers.all(),
+    publicOverview,
     createOrder(order) {
       const now = new Date().toISOString();
       const transaction = connection.transaction(() => {
@@ -456,12 +466,7 @@ function createDatabase(dataDirectory) {
     },
     recordAudit,
     stats(today) {
-      return {
-        totalRevenue: statements.paidRevenue.get().total,
-        activeMembers: statements.activeCount.get(today).count,
-        walkinsToday: statements.walkinsToday.get(today).count,
-        trainerCount: statements.trainerCount.get().count
-      };
+      return publicOverview(today);
     },
     importLegacyMembers(members, actor, calculateEndDate) {
       const transaction = connection.transaction(() => {
