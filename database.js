@@ -3,6 +3,74 @@ const path = require('path');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 
+function migrateOrders(connection) {
+  const migration = connection.transaction(() => {
+    const columns = new Set(connection.pragma('table_info(orders)').map(column => column.name));
+    const additions = [
+      ['email', 'TEXT'],
+      ['preferred_start_date', 'TEXT'],
+      ['payment_method', 'TEXT'],
+      ['payment_reference', 'TEXT'],
+      ['amount_received', 'REAL'],
+      ['paid_at', 'TEXT'],
+      ['confirmed_by', 'TEXT']
+    ];
+    for (const [name, type] of additions) {
+      if (!columns.has(name)) connection.exec(`ALTER TABLE orders ADD COLUMN ${name} ${type}`);
+    }
+
+    const table = connection.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orders'").get();
+    if (!table || !table.sql.includes("'Cancelled'")) {
+      const orderIndexes = connection.prepare(`
+        SELECT name, sql FROM sqlite_master
+        WHERE type = 'index' AND tbl_name = 'orders' AND sql IS NOT NULL
+      `).all();
+      connection.exec(`
+        ALTER TABLE orders RENAME TO orders_before_cancelled_migration;
+        CREATE TABLE orders_migration_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          receipt_id TEXT NOT NULL UNIQUE,
+          name TEXT NOT NULL,
+          phone TEXT NOT NULL,
+          plan TEXT NOT NULL,
+          plan_key TEXT NOT NULL CHECK (plan_key IN ('walkin', 'monthly', '6month')),
+          trainer INTEGER NOT NULL DEFAULT 0 CHECK (trainer IN (0, 1)),
+          total INTEGER NOT NULL CHECK (total >= 0),
+          status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid', 'Cancelled')),
+          date TEXT NOT NULL,
+          member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          email TEXT,
+          preferred_start_date TEXT,
+          payment_method TEXT,
+          payment_reference TEXT,
+          amount_received REAL,
+          paid_at TEXT,
+          confirmed_by TEXT
+        );
+        INSERT INTO orders_migration_new (
+          id, receipt_id, name, phone, plan, plan_key, trainer, total, status, date, member_id, created_at,
+          email, preferred_start_date, payment_method, payment_reference, amount_received, paid_at, confirmed_by
+        )
+        SELECT
+          id, receipt_id, name, phone, plan, plan_key, trainer, total, status, date, member_id, created_at,
+          email, preferred_start_date, payment_method, payment_reference, amount_received, paid_at, confirmed_by
+        FROM orders_before_cancelled_migration;
+        DROP TABLE orders_before_cancelled_migration;
+        ALTER TABLE orders_migration_new RENAME TO orders;
+        CREATE INDEX orders_date_idx ON orders(date);
+        CREATE INDEX orders_status_idx ON orders(status);
+      `);
+      for (const index of orderIndexes) {
+        if (!['orders_date_idx', 'orders_status_idx'].includes(index.name)) {
+          connection.exec(index.sql);
+        }
+      }
+    }
+  });
+  migration();
+}
+
 function createDatabase(dataDirectory) {
   fs.mkdirSync(dataDirectory, { recursive: true });
   const connection = new Database(path.join(dataDirectory, 'bigbozz.sqlite'));
@@ -31,10 +99,17 @@ function createDatabase(dataDirectory) {
       plan_key TEXT NOT NULL CHECK (plan_key IN ('walkin', 'monthly', '6month')),
       trainer INTEGER NOT NULL DEFAULT 0 CHECK (trainer IN (0, 1)),
       total INTEGER NOT NULL CHECK (total >= 0),
-      status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid')),
+      status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid', 'Cancelled')),
       date TEXT NOT NULL,
       member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      email TEXT,
+      preferred_start_date TEXT,
+      payment_method TEXT,
+      payment_reference TEXT,
+      amount_received REAL,
+      paid_at TEXT,
+      confirmed_by TEXT
     );
     CREATE INDEX IF NOT EXISTS orders_date_idx ON orders(date);
     CREATE INDEX IF NOT EXISTS orders_status_idx ON orders(status);
@@ -56,7 +131,14 @@ function createDatabase(dataDirectory) {
       expires INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires);
+    CREATE TABLE IF NOT EXISTS admin_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
+
+  migrateOrders(connection);
 
   const statements = {
     insertMember: connection.prepare(`
@@ -75,19 +157,34 @@ function createDatabase(dataDirectory) {
       VALUES (?, ?, ?, ?, ?, ?)
     `),
     insertOrder: connection.prepare(`
-      INSERT INTO orders (receipt_id, name, phone, plan, plan_key, trainer, total, status, date, created_at)
-      VALUES (@receiptId, @name, @phone, @plan, @planKey, @trainer, @total, 'Unpaid', @date, @createdAt)
+      INSERT INTO orders (
+        receipt_id, name, phone, plan, plan_key, trainer, total, status, date, created_at, email, preferred_start_date
+      ) VALUES (
+        @receiptId, @name, @phone, @plan, @planKey, @trainer, @total, 'Unpaid', @date, @createdAt, @email, @preferredStartDate
+      )
     `),
     selectOrder: connection.prepare('SELECT * FROM orders WHERE id = ?'),
-    listOrders: connection.prepare('SELECT * FROM orders ORDER BY id DESC'),
-    updateOrderPayment: connection.prepare('UPDATE orders SET status = ?, member_id = ? WHERE id = ?'),
+    listOrders: connection.prepare('SELECT * FROM orders ORDER BY created_at DESC, id DESC'),
+    countPendingOrders: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE status = 'Unpaid'"),
+    updateOrderPayment: connection.prepare(`
+      UPDATE orders SET status = 'Paid', member_id = ?, payment_method = ?, payment_reference = ?,
+        amount_received = ?, paid_at = ?, confirmed_by = ? WHERE id = ?
+    `),
+    cancelOrder: connection.prepare("UPDATE orders SET status = 'Cancelled' WHERE id = ? AND status = 'Unpaid'"),
+    getAdminPasswordHash: connection.prepare("SELECT value FROM admin_settings WHERE key = 'password_hash'"),
+    insertAdminPasswordHash: connection.prepare(`
+      INSERT OR IGNORE INTO admin_settings (key, value, updated_at) VALUES ('password_hash', ?, ?)
+    `),
+    updateAdminPasswordHash: connection.prepare(`
+      UPDATE admin_settings SET value = ?, updated_at = ? WHERE key = 'password_hash'
+    `),
     listAudit: connection.prepare(`
       SELECT id, created_at AS createdAt, actor, action, entity_type AS entityType,
         entity_id AS entityId, details_json AS details
       FROM audit_log ORDER BY id DESC LIMIT ?
     `),
     paidRevenue: connection.prepare("SELECT COALESCE(SUM(total), 0) AS total FROM orders WHERE status = 'Paid'"),
-    walkinsToday: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE plan_key = 'walkin' AND date = ?"),
+    walkinsToday: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE plan_key = 'walkin' AND status = 'Paid' AND date = ?"),
     trainerCount: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE trainer = 1 AND status = 'Paid'"),
     activeCount: connection.prepare('SELECT COUNT(*) AS count FROM members WHERE end_date >= ?'),
     findMemberByIdentity: connection.prepare(`
@@ -140,6 +237,8 @@ function createDatabase(dataDirectory) {
       const transaction = connection.transaction(() => {
         const result = statements.insertOrder.run({
           ...order,
+          email: order.email || null,
+          preferredStartDate: order.preferredStartDate || null,
           trainer: order.trainer ? 1 : 0,
           createdAt: now
         });
@@ -200,21 +299,50 @@ function createDatabase(dataDirectory) {
       });
       return transaction();
     },
-    listOrders: () => statements.listOrders.all(),
-    confirmPayment(id, today, calculateEndDate, addDate, actor) {
+    listOrders(filters = {}) {
+      const conditions = [];
+      const values = [];
+      if (filters.status && filters.status !== 'All') {
+        conditions.push('status = ?');
+        values.push(filters.status);
+      }
+      if (filters.query) {
+        conditions.push("(lower(name) LIKE lower(?) OR lower(phone) LIKE lower(?) OR lower(receipt_id) LIKE lower(?))");
+        const query = `%${filters.query}%`;
+        values.push(query, query, query);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+      const total = connection.prepare(`SELECT COUNT(*) AS count FROM orders ${where}`).get(...values).count;
+      const limit = Number.isInteger(filters.limit) ? filters.limit : 10000;
+      const offset = Number.isInteger(filters.offset) ? filters.offset : 0;
+      const orders = connection.prepare(`
+        SELECT * FROM orders ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+      `).all(...values, limit, offset);
+      return { orders, total, pendingCount: statements.countPendingOrders.get().count };
+    },
+    getOrder: id => statements.selectOrder.get(id),
+    confirmPayment(id, today, calculateEndDate, addDate, actor, payment) {
       const transaction = connection.transaction(() => {
         const order = statements.selectOrder.get(id);
         if (!order) return null;
         if (order.status === 'Paid') return order;
+        if (order.status === 'Cancelled') {
+          const error = new Error('Cancelled orders cannot be paid.');
+          error.code = 'ORDER_CANCELLED';
+          throw error;
+        }
 
         let memberId = null;
         let memberBefore = null;
+        const preferredStartDate = order.preferred_start_date && order.preferred_start_date >= today
+          ? order.preferred_start_date
+          : today;
         if (order.plan_key !== 'walkin') {
           const existing = statements.findMemberByIdentity.get(order.phone, order.name.trim());
           if (existing) {
             memberId = existing.id;
             memberBefore = memberSnapshot(existing);
-            const startDate = existing.end_date >= today ? addDate(existing.end_date, 1) : today;
+            const startDate = existing.end_date >= today ? addDate(existing.end_date, 1) : preferredStartDate;
             statements.updateMember.run({
               id: memberId,
               name: order.name,
@@ -232,7 +360,7 @@ function createDatabase(dataDirectory) {
             });
           } else {
             memberId = crypto.randomUUID();
-            const startDate = today;
+            const startDate = preferredStartDate;
             statements.insertMember.run({
               id: memberId,
               name: order.name,
@@ -250,16 +378,77 @@ function createDatabase(dataDirectory) {
           }
         }
 
-        statements.updateOrderPayment.run('Paid', memberId, id);
+        const paidAt = new Date().toISOString();
+        statements.updateOrderPayment.run(
+          memberId,
+          payment.paymentMethod,
+          payment.paymentReference || null,
+          payment.amountReceived,
+          paidAt,
+          actor,
+          id
+        );
         const paidOrder = statements.selectOrder.get(id);
         recordAudit(actor, 'payment_confirmed', 'order', id, {
           receiptId: order.receipt_id,
-          amount: order.total,
+          expectedAmount: order.total,
+          paymentMethod: payment.paymentMethod,
+          paymentReference: payment.paymentReference || null,
+          amountReceived: payment.amountReceived,
+          allowMismatch: payment.allowMismatch === true,
+          paidAt,
+          confirmedBy: actor,
           memberId
         });
         return paidOrder;
       });
       return transaction();
+    },
+    cancelOrder(id, actor) {
+      const transaction = connection.transaction(() => {
+        const before = statements.selectOrder.get(id);
+        if (!before) return { result: 'missing' };
+        if (before.status !== 'Unpaid') return { result: 'not_unpaid', order: before };
+        statements.cancelOrder.run(id);
+        const after = statements.selectOrder.get(id);
+        recordAudit(actor, 'order_cancelled', 'order', id, {
+          receiptId: before.receipt_id,
+          previousStatus: before.status,
+          status: after.status
+        });
+        return { result: 'cancelled', order: after };
+      });
+      return transaction();
+    },
+    seedAdminPasswordHash(passwordHash) {
+      const transaction = connection.transaction(() => {
+        const result = statements.insertAdminPasswordHash.run(passwordHash, new Date().toISOString());
+        if (result.changes) {
+          recordAudit('system', 'admin_password_seeded', 'admin_settings', 'password_hash', {
+            source: 'ADMIN_PASSWORD'
+          });
+        }
+        return statements.getAdminPasswordHash.get().value;
+      });
+      return transaction();
+    },
+    getAdminPasswordHash() {
+      const row = statements.getAdminPasswordHash.get();
+      return row ? row.value : null;
+    },
+    changeAdminPasswordHash(passwordHash, actor) {
+      const transaction = connection.transaction(() => {
+        statements.updateAdminPasswordHash.run(passwordHash, new Date().toISOString());
+        recordAudit(actor, 'admin_password_changed', 'admin_settings', 'password_hash', {
+          changedAt: new Date().toISOString()
+        });
+      });
+      transaction();
+    },
+    recordFailedLogin(actor) {
+      recordAudit(actor || 'anonymous', 'failed_login', 'admin', 'login', {
+        attemptedAt: new Date().toISOString()
+      });
     },
     listAudit(limit) {
       return statements.listAudit.all(Math.min(Math.max(Number(limit) || 100, 1), 500))

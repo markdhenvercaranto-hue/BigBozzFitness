@@ -81,7 +81,14 @@ function mapOrder(row) {
     status: row.status,
     date: row.date,
     memberId: row.member_id,
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    email: row.email || '',
+    preferredStartDate: row.preferred_start_date || '',
+    paymentMethod: row.payment_method || '',
+    paymentReference: row.payment_reference || '',
+    amountReceived: row.amount_received,
+    paidAt: row.paid_at || '',
+    confirmedBy: row.confirmed_by || ''
   };
 }
 
@@ -116,7 +123,7 @@ function createApplication(options = {}) {
   const sessionSecret = options.sessionSecret || process.env.SESSION_SECRET;
   const isProduction = options.isProduction ?? process.env.NODE_ENV === 'production';
 
-  if (!adminPassword || adminPassword.length < 12) {
+  if (adminPassword && adminPassword.length < 12) {
     throw new Error('Set ADMIN_PASSWORD to a password of at least 12 characters in the .env file.');
   }
   if (!sessionSecret || sessionSecret.length < 32) {
@@ -125,7 +132,10 @@ function createApplication(options = {}) {
 
   const database = options.database || createDatabase(dataDirectory);
   const app = express();
-  const passwordHash = bcrypt.hashSync(adminPassword, 12);
+  if (adminPassword) database.seedAdminPasswordHash(bcrypt.hashSync(adminPassword, 12));
+  if (!database.getAdminPasswordHash()) {
+    throw new Error('Set ADMIN_PASSWORD to seed the initial admin password.');
+  }
   const sessionStore = database.createSessionStore(session);
 
   if (isProduction) app.set('trust proxy', 1);
@@ -162,6 +172,23 @@ function createApplication(options = {}) {
       maxAge: 1000 * 60 * 60 * 8
     }
   }));
+  app.use('/api/admin', (req, res, next) => {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+    if (!req.session || !req.session.isAuthenticated) return next();
+    const origin = req.get('origin');
+    if (req.get('x-requested-with') !== 'fetch' || !origin) {
+      return res.status(403).json({ message: 'This request could not be verified. Refresh the page and try again.' });
+    }
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      if (originHost !== String(req.get('host') || '').toLowerCase()) {
+        return res.status(403).json({ message: 'This request could not be verified. Refresh the page and try again.' });
+      }
+    } catch {
+      return res.status(403).json({ message: 'This request could not be verified. Refresh the page and try again.' });
+    }
+    return next();
+  });
   app.use('/api/admin', (req, res, next) => {
     res.set('Cache-Control', 'no-store');
     next();
@@ -212,9 +239,13 @@ function createApplication(options = {}) {
       const usernameOrEmail = String(req.body.usernameOrEmail || '').trim().toLowerCase();
       const password = String(req.body.password || '');
       const matchesAdminIdentity = usernameOrEmail === adminUsername.toLowerCase() || usernameOrEmail === adminEmail;
-      const isValidPassword = await bcrypt.compare(password, matchesAdminIdentity ? passwordHash : DUMMY_PASSWORD_HASH);
+      const isValidPassword = await bcrypt.compare(
+        password,
+        matchesAdminIdentity ? database.getAdminPasswordHash() : DUMMY_PASSWORD_HASH
+      );
 
       if (!matchesAdminIdentity || !isValidPassword) {
+        database.recordFailedLogin(usernameOrEmail.slice(0, 120) || 'anonymous');
         return res.status(401).json({ message: 'Invalid admin credentials.' });
       }
 
@@ -249,6 +280,8 @@ function createApplication(options = {}) {
       const phone = typeof req.body.phone === 'string' ? req.body.phone.trim() : '';
       const planKey = req.body.planKey;
       const trainer = req.body.trainer === true;
+      const email = typeof req.body.email === 'string' ? req.body.email.trim() : '';
+      const preferredStartDate = req.body.preferredStartDate || getTodayDateString();
       const planDetails = {
         walkin: { name: 'Walk-in / Per Session', price: 50 },
         monthly: { name: 'Monthly Standard Plan', price: 500 },
@@ -258,6 +291,12 @@ function createApplication(options = {}) {
       if (!name || name.length > 100) return res.status(400).json({ message: 'Enter a name between 1 and 100 characters.' });
       if (!phone || phone.length > 30) return res.status(400).json({ message: 'Enter a phone number of 30 characters or fewer.' });
       if (!planDetails) return res.status(400).json({ message: 'Choose a valid membership plan.' });
+      if (email.length > 320 || (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))) {
+        return res.status(400).json({ message: 'Enter a valid email address, or leave it blank.' });
+      }
+      if (!isValidDateString(preferredStartDate) || preferredStartDate < getTodayDateString()) {
+        return res.status(400).json({ message: 'Preferred start date must be a valid date today or later.' });
+      }
 
       const order = database.createOrder({
         receiptId: `BB-${crypto.randomBytes(5).toString('hex').toUpperCase()}`,
@@ -267,7 +306,9 @@ function createApplication(options = {}) {
         planKey,
         trainer,
         total: planDetails.price + (trainer ? 1500 : 0),
-        date: getTodayDateString()
+        date: getTodayDateString(),
+        email: email || null,
+        preferredStartDate
       });
       return res.status(201).json(mapOrder(order));
     } catch (error) {
@@ -368,7 +409,30 @@ function createApplication(options = {}) {
 
   app.get('/api/admin/orders', isAuthenticated, (req, res) => {
     try {
-      return res.json(database.listOrders().map(mapOrder));
+      const hasFilters = ['status', 'q', 'limit', 'offset'].some(key => Object.hasOwn(req.query, key));
+      const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : 'All';
+      const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      const limit = req.query.limit === undefined ? 25 : Number(req.query.limit);
+      const offset = req.query.offset === undefined ? 0 : Number(req.query.offset);
+      if (!['All', 'Unpaid', 'Paid', 'Cancelled'].includes(status)) {
+        return res.status(400).json({ message: 'Choose All, Unpaid, Paid, or Cancelled status.' });
+      }
+      if (query.length > 100) return res.status(400).json({ message: 'Search text must be 100 characters or fewer.' });
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ message: 'Limit must be an integer between 1 and 100.' });
+      }
+      if (!Number.isInteger(offset) || offset < 0) {
+        return res.status(400).json({ message: 'Offset must be a non-negative integer.' });
+      }
+      const result = database.listOrders({
+        status,
+        query,
+        limit: hasFilters ? limit : 10000,
+        offset: hasFilters ? offset : 0
+      });
+      const orders = result.orders.map(mapOrder);
+      if (!hasFilters) return res.json(orders);
+      return res.json({ orders, total: result.total, limit, offset, pendingCount: result.pendingCount });
     } catch (error) {
       return respondWithError(res, error);
     }
@@ -383,15 +447,80 @@ function createApplication(options = {}) {
       return res.status(400).json({ message: 'Invalid order ID.' });
     }
     try {
+      const currentOrder = database.getOrder(orderId);
+      if (!currentOrder) return res.status(404).json({ message: 'Order not found.' });
+      if (currentOrder.status === 'Paid') return res.json(mapOrder(currentOrder));
+      if (currentOrder.status === 'Cancelled') {
+        return res.status(409).json({ message: 'Cancelled orders cannot be paid.' });
+      }
+    } catch (error) {
+      return respondWithError(res, error);
+    }
+    const paymentMethod = req.body.paymentMethod === undefined ? 'Cash' : req.body.paymentMethod;
+    if (req.body.paymentReference !== undefined && typeof req.body.paymentReference !== 'string') {
+      return res.status(400).json({ message: 'Reference number must be text.' });
+    }
+    const paymentReference = typeof req.body.paymentReference === 'string' ? req.body.paymentReference.trim() : '';
+    const amountReceived = req.body.amountReceived === undefined
+      ? undefined
+      : req.body.amountReceived;
+    if (!['Cash', 'GCash'].includes(paymentMethod)) {
+      return res.status(400).json({ message: 'Choose Cash or GCash as the payment method.' });
+    }
+    if (paymentReference.length > 50 || (paymentMethod === 'GCash' && !paymentReference)) {
+      return res.status(400).json({ message: 'Reference numbers must be 50 characters or fewer; GCash requires one.' });
+    }
+    try {
+      const currentOrder = database.getOrder(orderId);
+      const received = amountReceived === undefined ? currentOrder.total : amountReceived;
+      if (typeof received !== 'number' || !Number.isFinite(received) || received < 0 || received > 1000000000) {
+        return res.status(400).json({ message: 'Enter a valid amount received.' });
+      }
+      if (received !== currentOrder.total && req.body.allowMismatch !== true) {
+        return res.status(400).json({
+          message: `Amount received must equal ₱${Number(currentOrder.total).toLocaleString()} unless you explicitly allow the mismatch.`,
+          requiresMismatchConfirmation: true
+        });
+      }
       const order = database.confirmPayment(
         orderId,
         getTodayDateString(),
         calculateMembershipEndDate,
         addDays,
-        req.session.user.username
+        req.session.user.username,
+        { paymentMethod, paymentReference, amountReceived: received, allowMismatch: req.body.allowMismatch === true }
       );
       if (!order) return res.status(404).json({ message: 'Order not found.' });
       return res.json(mapOrder(order));
+    } catch (error) {
+      if (error.code === 'ORDER_CANCELLED') return res.status(409).json({ message: error.message });
+      return respondWithError(res, error);
+    }
+  });
+
+  app.patch('/api/admin/orders/:id/cancel', isAuthenticated, (req, res) => {
+    const orderId = Number(req.params.id);
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) return res.status(400).json({ message: 'Invalid order ID.' });
+    try {
+      const result = database.cancelOrder(orderId, req.session.user.username);
+      if (result.result === 'missing') return res.status(404).json({ message: 'Order not found.' });
+      if (result.result === 'not_unpaid') return res.status(409).json({ message: 'Only unpaid orders can be cancelled.' });
+      return res.json(mapOrder(result.order));
+    } catch (error) {
+      return respondWithError(res, error);
+    }
+  });
+
+  app.patch('/api/admin/password', isAuthenticated, async (req, res) => {
+    const currentPassword = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
+    const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
+    if (newPassword.length < 12) return res.status(400).json({ message: 'New password must be at least 12 characters.' });
+    try {
+      if (!await bcrypt.compare(currentPassword, database.getAdminPasswordHash())) {
+        return res.status(401).json({ message: 'Current password is incorrect.' });
+      }
+      database.changeAdminPasswordHash(await bcrypt.hash(newPassword, 12), req.session.user.username);
+      return res.json({ success: true, message: 'Admin password updated.' });
     } catch (error) {
       return respondWithError(res, error);
     }

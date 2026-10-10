@@ -13,7 +13,7 @@ Copy-Item .env.example (Join-Path $privateDir '.env')
 node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 ```
 
-Open `%LOCALAPPDATA%\BigBozzFitness\.env` in a text editor. Replace `ADMIN_PASSWORD` with your own unique password (at least 12 characters). Paste the generated random value into `SESSION_SECRET`. This keeps the secrets and private database outside the synced website project. Do not share `.env`.
+Open `%LOCALAPPDATA%\BigBozzFitness\.env` in a text editor. Replace `ADMIN_PASSWORD` with your own unique password (at least 12 characters). Paste the generated random value into `SESSION_SECRET`. On the first run, the app hashes `ADMIN_PASSWORD` into the private SQLite `admin_settings` table. After that, change passwords from **Security** in the dashboard; the saved hash is authoritative, and changing `.env` will not reset it. This keeps the secrets and private database outside the synced website project. Do not share `.env`.
 
 Install the locked dependencies once, then start the app:
 
@@ -44,20 +44,29 @@ In the older version, orders and payment status existed only in the running Node
 
 The public pricing form records a **reservation**, not a payment. The server validates the selected plan and calculates the price; the browser cannot set the amount or mark the reservation as paid.
 
+The form records an optional email and the customer's preferred start date. The date must be today or later; it is used when activating a new membership after payment. For an already active member, the existing remaining-days extension rule takes precedence.
+
 When the gym has actually received the money:
 
-1. Open **Orders & Registrations** (or **Customers** for membership reservations).
-2. Find the correct receipt and verify the name, plan, and amount.
-3. Select **Confirm Payment** only after collection.
+1. Open **Orders & Registrations** (or **Customers** for membership reservations). The Orders tab has server-side name/phone/receipt search, status filters, pagination, and a Pending payments shortcut/count.
+2. Find the correct receipt and verify the name, plan, and amount. Unpaid orders older than seven days are labelled stale.
+3. Select **Confirm Payment** only after collection. Choose Cash or GCash, enter the amount received, and enter the GCash reference (required; at most 50 characters). If the amount does not match, explicitly select the mismatch override.
+4. The app records the payment details and confirmer, creates or extends the membership in the same transaction, and then offers a printable/downloadable PAID receipt.
+
+Unpaid orders can be cancelled from the Orders tab. Paid orders cannot be cancelled, and cancelled orders cannot create a membership or contribute to revenue. The Walk-ins Today metric counts paid walk-ins only.
 
 Confirmed payments update the revenue figures. A confirmed Monthly or 6-Month order creates a membership; if the same name and phone already identify a member, it extends that member's dates without discarding remaining active days. Walk-in orders do not create memberships.
 
 This project does not connect to a bank, e-wallet, or payment gateway. Confirming payment is an admin record-keeping action; it is not proof that an online payment was received.
 Once marked Paid, an order cannot be reverted in this version. This avoids silently undoing recognized revenue or an active membership; record refunds or payment corrections separately until a dedicated refund workflow is added.
 
+When updating an existing installation, make a separate database backup before starting the new app version. The startup migration safely adds missing order columns and rebuilds the order status constraint to support Cancelled, preserving stored orders. Do not remove the original database until the app has started and you have checked members and orders.
+
 ## 4. Change history, exports, and backups
 
 **Audit & Backups** shows recent member, payment, and backup events, including before/after membership dates for edits and renewals. The log is restricted to the admin dashboard.
+
+Open **Security** to change the administrator password. The current password is verified and new passwords must be at least 12 characters. Failed login attempts are recorded without passwords. State-changing admin requests must come from the same origin and include the app's custom request header; the dashboard sends this automatically.
 
 - **Export Data** downloads a CSV containing the current member list and order history.
 - **Create Backup** creates a SQLite backup, downloads a copy to the admin's browser, and keeps the server copy under `%LOCALAPPDATA%\BigBozzFitness\backups` (or `DATA_DIR\backups` if configured).

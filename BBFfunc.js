@@ -7,6 +7,7 @@ const PRICING = {
 };
 
 let customersData = [];
+let ordersPageData = [];
 let membersData = [];
 let editingMemberId = null;
 let memberRefreshTimeout;
@@ -14,6 +15,13 @@ let adminDataLoaded = false;
 
 let currentAdminTab = 'customers';
 let revenueChart;
+let orderSearchQuery = '';
+let orderStatusFilter = 'All';
+let orderPageOffset = 0;
+let orderPageTotal = 0;
+let pendingOrderCount = 0;
+let paymentReturnFocus = null;
+const ORDER_PAGE_SIZE = 25;
 
 // Calculate Plan Summary
 function calculateTotal() {
@@ -137,6 +145,9 @@ async function showSection(view) {
 async function adminApi(endpoint, options = {}) {
     const headers = { Accept: 'application/json', ...(options.headers || {}) };
     if (options.body) headers['Content-Type'] = 'application/json';
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes((options.method || 'GET').toUpperCase())) {
+        headers['X-Requested-With'] = 'fetch';
+    }
 
     const response = await fetch(endpoint, {
         ...options,
@@ -160,6 +171,10 @@ async function loadAdminData() {
 
     membersData = serverMembers;
     customersData = orders;
+    ordersPageData = orders.slice(0, ORDER_PAGE_SIZE);
+    orderPageTotal = orders.length;
+    pendingOrderCount = orders.filter(order => order.status === 'Unpaid').length;
+    updatePendingOrderBadge();
 
     let legacyMembers;
     try {
@@ -313,6 +328,8 @@ async function handleRegistrationSubmit(event) {
             body: JSON.stringify({
                 name,
                 phone,
+                email: document.getElementById('regEmail').value.trim(),
+                preferredStartDate: document.getElementById('regStartDate').value,
                 planKey: calc.selectedPlan,
                 trainer: calc.hasTrainer
             })
@@ -332,6 +349,8 @@ async function handleRegistrationSubmit(event) {
     document.getElementById('rcptPlanPrice').textContent = `₱${planPrice.toLocaleString()}`;
     document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
     document.getElementById('rcptTotal').textContent = `₱${order.total.toLocaleString()}`;
+    document.getElementById('rcptStatus').textContent = 'UNPAID / RESERVED';
+    document.getElementById('rcptPaymentDetails').classList.add('hidden');
 
     customersData.unshift(order);
 
@@ -341,6 +360,112 @@ async function handleRegistrationSubmit(event) {
 
 function closeReceiptModal() {
     document.getElementById('receiptModal').classList.add('hidden');
+}
+
+function showPaidReceipt(order) {
+    document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
+    document.getElementById('rcptDate').textContent = formatMemberDate(order.paidAt ? order.paidAt.slice(0, 10) : order.date);
+    document.getElementById('rcptName').textContent = order.name;
+    document.getElementById('rcptPhone').textContent = order.phone;
+    document.getElementById('rcptPlanName').textContent = order.plan;
+    const planPrice = order.total - (order.trainer ? PRICING.trainer : 0);
+    document.getElementById('rcptPlanPrice').textContent = `₱${planPrice.toLocaleString()}`;
+    document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
+    document.getElementById('rcptTotal').textContent = `₱${Number(order.total).toLocaleString()}`;
+    document.getElementById('rcptStatus').textContent = 'PAID';
+    document.getElementById('rcptPaymentMethod').textContent = order.paymentMethod || 'Cash';
+    document.getElementById('rcptPaymentReference').textContent = order.paymentReference || '—';
+    document.getElementById('rcptConfirmedBy').textContent = order.confirmedBy || '—';
+    document.getElementById('rcptPaymentDetails').classList.remove('hidden');
+    document.getElementById('receiptModal').classList.remove('hidden');
+}
+
+function openPaymentModal(orderId) {
+    const order = customersData.find(item => item.id === orderId);
+    if (!order || order.status !== 'Unpaid') return;
+    const form = document.getElementById('paymentConfirmationForm');
+    form.reset();
+    document.getElementById('paymentOrderId').value = order.id;
+    document.getElementById('paymentOrderSummary').textContent =
+        `${order.name} · ${order.receiptId} · ₱${Number(order.total).toLocaleString()}`;
+    document.getElementById('amountReceived').value = Number(order.total).toFixed(2);
+    updatePaymentReferenceRequirement();
+    document.getElementById('paymentMismatch').checked = false;
+    document.getElementById('paymentFormStatus').textContent = '';
+    document.getElementById('paymentFormStatus').className = 'text-sm text-gray-400 min-h-[20px]';
+    paymentReturnFocus = document.activeElement;
+    const modal = document.getElementById('paymentConfirmationModal');
+    modal.classList.remove('hidden');
+    document.getElementById('paymentMethod').focus();
+}
+
+function closePaymentModal() {
+    document.getElementById('paymentConfirmationModal').classList.add('hidden');
+    if (paymentReturnFocus instanceof HTMLElement) paymentReturnFocus.focus();
+    paymentReturnFocus = null;
+}
+
+function handlePaymentModalKeydown(event) {
+    const modal = document.getElementById('paymentConfirmationModal');
+    if (modal.classList.contains('hidden')) return;
+    if (event.key === 'Escape') {
+        closePaymentModal();
+        return;
+    }
+    if (event.key === 'Tab') {
+        const focusable = [...modal.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled])')];
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+        }
+    }
+}
+
+function updatePaymentReferenceRequirement() {
+    const isGCash = document.getElementById('paymentMethod').value === 'GCash';
+    const reference = document.getElementById('paymentReference');
+    reference.required = isGCash;
+    reference.setAttribute('aria-required', String(isGCash));
+}
+
+async function submitPaymentConfirmation(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const orderId = Number(document.getElementById('paymentOrderId').value);
+    const status = document.getElementById('paymentFormStatus');
+    const submitButton = form.querySelector('[type="submit"]');
+    const payload = {
+        status: 'Paid',
+        paymentMethod: document.getElementById('paymentMethod').value,
+        paymentReference: document.getElementById('paymentReference').value.trim(),
+        amountReceived: Number(document.getElementById('amountReceived').value),
+        allowMismatch: document.getElementById('paymentMismatch').checked
+    };
+    status.textContent = 'Saving payment…';
+    submitButton.disabled = true;
+    try {
+        const paidOrder = await adminApi(`/api/admin/orders/${orderId}/payment`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload)
+        });
+        closePaymentModal();
+        await loadAdminData();
+        updateAdminStats();
+        if (currentAdminTab === 'orders') await loadOrdersPage();
+        else renderAdminTabContent();
+        showPaidReceipt(paidOrder);
+    } catch (error) {
+        console.error('Unable to confirm order payment.', error);
+        status.textContent = error.message;
+        status.className = 'text-sm text-red-300 min-h-[20px]';
+    } finally {
+        submitButton.disabled = false;
+    }
 }
 
 // Download Receipt as PDF
@@ -375,7 +500,56 @@ function switchAdminTab(tabName) {
         activeBtn.classList.remove('border-transparent', 'text-gray-400');
     }
 
-    if (adminDataLoaded) renderAdminTabContent();
+    if (adminDataLoaded) {
+        renderAdminTabContent();
+        if (tabName === 'orders') loadOrdersPage();
+    }
+}
+
+function updatePendingOrderBadge() {
+    const badge = document.getElementById('pendingPaymentsNavBadge');
+    if (badge) badge.textContent = pendingOrderCount;
+}
+
+async function loadOrdersPage() {
+    const params = new URLSearchParams({
+        status: orderStatusFilter,
+        q: orderSearchQuery,
+        limit: String(ORDER_PAGE_SIZE),
+        offset: String(orderPageOffset)
+    });
+    try {
+        const result = await adminApi(`/api/admin/orders?${params}`);
+        ordersPageData = result.orders;
+        orderPageTotal = result.total;
+        pendingOrderCount = result.pendingCount;
+        updatePendingOrderBadge();
+        if (currentAdminTab === 'orders') renderAdminTabContent();
+    } catch (error) {
+        console.error('Unable to load filtered orders.', error);
+        const container = document.getElementById('adminTabContent');
+        container.innerHTML = `<div role="alert" class="text-red-300 p-4">${escapeHtml(error.message)}</div>`;
+    }
+}
+
+function applyOrderFilters(event) {
+    event.preventDefault();
+    orderSearchQuery = document.getElementById('orderSearch').value.trim();
+    orderStatusFilter = document.getElementById('orderStatus').value;
+    orderPageOffset = 0;
+    loadOrdersPage();
+}
+
+function showPendingOrders() {
+    orderSearchQuery = '';
+    orderStatusFilter = 'Unpaid';
+    orderPageOffset = 0;
+    loadOrdersPage();
+}
+
+function changeOrderPage(direction) {
+    orderPageOffset = Math.max(0, orderPageOffset + direction * ORDER_PAGE_SIZE);
+    loadOrdersPage();
 }
 
 function renderAdminTabContent() {
@@ -386,13 +560,33 @@ function renderAdminTabContent() {
     } else if (currentAdminTab === 'customers' || currentAdminTab === 'orders') {
         const visibleOrders = currentAdminTab === 'customers'
             ? customersData.filter(order => order.planKey !== 'walkin')
-            : customersData;
+            : ordersPageData;
+        const ordersHeader = currentAdminTab === 'orders' ? `
+            <form id="orderFilterForm" onsubmit="applyOrderFilters(event)" class="p-4 border-b border-gray-800 flex flex-wrap items-center gap-3">
+                <label class="sr-only" for="orderSearch">Search orders</label>
+                <input id="orderSearch" type="search" maxlength="100" value="${escapeHtml(orderSearchQuery)}" placeholder="Search name, phone, or receipt ID" class="min-w-[220px] flex-1 bg-black/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">
+                <label class="sr-only" for="orderStatus">Order status</label>
+                <select id="orderStatus" class="bg-black/50 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">
+                    ${['All', 'Unpaid', 'Paid', 'Cancelled'].map(status => `<option value="${status}" ${orderStatusFilter === status ? 'selected' : ''}>${status}</option>`).join('')}
+                </select>
+                <button type="submit" class="bg-gold-500 hover:bg-gold-600 text-black px-4 py-2 rounded-lg text-sm font-bold">Search</button>
+                <button type="button" onclick="showPendingOrders()" class="border border-yellow-500/40 text-yellow-300 px-3 py-2 rounded-lg text-sm font-semibold">Pending payments <span id="pendingOrderBadge">${pendingOrderCount}</span></button>
+            </form>` : '';
+        const pagination = currentAdminTab === 'orders' ? `
+            <div class="p-4 border-t border-gray-800 flex items-center justify-between gap-3">
+                <span class="text-xs text-gray-400">${orderPageTotal ? `${orderPageOffset + 1}–${Math.min(orderPageOffset + ORDER_PAGE_SIZE, orderPageTotal)} of ${orderPageTotal}` : '0 entries'}</span>
+                <div class="flex gap-2">
+                    <button type="button" onclick="changeOrderPage(-1)" ${orderPageOffset === 0 ? 'disabled' : ''} class="border border-gray-700 disabled:opacity-40 px-3 py-1.5 rounded-lg text-xs">Previous</button>
+                    <button type="button" onclick="changeOrderPage(1)" ${orderPageOffset + ORDER_PAGE_SIZE >= orderPageTotal ? 'disabled' : ''} class="border border-gray-700 disabled:opacity-40 px-3 py-1.5 rounded-lg text-xs">Next</button>
+                </div>
+            </div>` : '';
         container.innerHTML = `
             <div class="bg-cardbg border border-gray-800 rounded-2xl overflow-hidden">
                 <div class="p-4 border-b border-gray-800 flex justify-between items-center">
                     <h3 class="font-bold text-white">${currentAdminTab === 'customers' ? 'Membership Reservations' : 'Recent Registrations / Orders'}</h3>
-                    <span class="text-xs text-gray-400">${visibleOrders.length} entries</span>
+                    <span class="text-xs text-gray-400">${currentAdminTab === 'customers' ? `${visibleOrders.length} entries` : `Pending: ${pendingOrderCount}`}</span>
                 </div>
+                ${ordersHeader}
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-xs sm:text-sm text-gray-300">
                         <thead class="bg-black/50 text-gray-400 uppercase text-[11px] border-b border-gray-800">
@@ -420,13 +614,14 @@ function renderAdminTabContent() {
                                     <td class="p-4 font-bold text-white">₱${Number(order.total).toLocaleString()}</td>
                                     <td class="p-4 whitespace-nowrap">${escapeHtml(order.date)}</td>
                                     <td class="p-4">
-                                        <span class="px-2.5 py-1 rounded-full text-[11px] font-bold ${order.status === 'Paid' ? 'bg-green-500/10 text-green-400 border border-green-500/30' : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'}">
+                                        <span class="px-2.5 py-1 rounded-full text-[11px] font-bold ${order.status === 'Paid' ? 'bg-green-500/10 text-green-400 border border-green-500/30' : order.status === 'Cancelled' ? 'bg-red-500/10 text-red-300 border border-red-500/30' : 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/30'}">
                                             ${escapeHtml(order.status)}
                                         </span>
+                                        ${order.status === 'Unpaid' && Date.now() - Date.parse(order.createdAt) > 7 * 86400000 ? '<span class="block mt-1 text-[10px] text-orange-300">Stale · over 7 days</span>' : ''}
                                     </td>
                                     <td class="p-4">
                                         ${order.status === 'Unpaid'
-                                            ? `<button onclick="confirmPayment(${order.id})" class="border border-green-500/40 bg-green-500/10 text-green-300 hover:bg-green-500 hover:text-black px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap"><i class="fa-solid fa-check mr-1"></i>Confirm Payment</button>`
+                                            ? `<div class="flex flex-wrap gap-2"><button onclick="openPaymentModal(${order.id})" class="border border-green-500/40 bg-green-500/10 text-green-300 hover:bg-green-500 hover:text-black px-3 py-1.5 rounded-lg text-xs font-semibold whitespace-nowrap"><i class="fa-solid fa-check mr-1"></i>Confirm Payment</button><button onclick="cancelOrder(${order.id})" class="border border-red-500/40 text-red-300 hover:bg-red-500/20 px-3 py-1.5 rounded-lg text-xs font-semibold">Cancel</button></div>`
                                             : '<span class="text-xs text-gray-500">Recorded</span>'}
                                     </td>
                                 </tr>
@@ -434,6 +629,7 @@ function renderAdminTabContent() {
                         </tbody>
                     </table>
                 </div>
+                ${pagination}
             </div>
         `;
     } else if (currentAdminTab === 'services') {
@@ -467,6 +663,25 @@ function renderAdminTabContent() {
                     </div>
                 </div>
             </div>
+        `;
+    } else if (currentAdminTab === 'security') {
+        container.innerHTML = `
+            <section class="bg-cardbg border border-gray-800 p-6 rounded-2xl space-y-4">
+                <div>
+                    <h3 class="font-bold text-lg text-white">Change admin password</h3>
+                    <p class="text-xs text-gray-400 mt-1">Use your current password to set a new password with at least 12 characters.</p>
+                </div>
+                <form id="adminPasswordForm" onsubmit="changeAdminPassword(event)" class="grid md:grid-cols-3 gap-3">
+                    <label class="text-xs text-gray-400">Current password
+                        <input id="currentAdminPassword" type="password" required autocomplete="current-password" class="mt-2 w-full bg-black/50 border border-gray-700 rounded-lg px-3 py-2.5 text-white">
+                    </label>
+                    <label class="text-xs text-gray-400">New password
+                        <input id="newAdminPassword" type="password" minlength="12" required autocomplete="new-password" class="mt-2 w-full bg-black/50 border border-gray-700 rounded-lg px-3 py-2.5 text-white">
+                    </label>
+                    <button type="submit" class="self-end bg-gold-500 hover:bg-gold-600 text-black px-4 py-2.5 rounded-lg font-bold">Update password</button>
+                    <p id="passwordChangeStatus" role="status" aria-live="polite" class="md:col-span-3 text-sm text-gray-400 min-h-[20px]"></p>
+                </form>
+            </section>
         `;
     } else if (currentAdminTab === 'reports') {
         container.innerHTML = `
@@ -773,25 +988,46 @@ async function deleteMember(memberId) {
 }
 
 async function confirmPayment(orderId) {
-    const order = customersData.find(item => item.id === orderId);
-    if (!order) {
-        console.error(`Cannot confirm payment: order ${orderId} was not found.`);
-        return;
-    }
-    if (order.status === 'Paid') return;
-    if (!window.confirm(`Confirm that you received ₱${Number(order.total).toLocaleString()} from ${order.name}? A paid membership plan will activate or extend their membership.`)) return;
+    openPaymentModal(orderId);
+}
 
+async function cancelOrder(orderId) {
+    const order = customersData.find(item => item.id === orderId) || ordersPageData.find(item => item.id === orderId);
+    if (!order || order.status !== 'Unpaid') return;
+    if (!window.confirm(`Cancel the unpaid order ${order.receiptId} for ${order.name}?`)) return;
     try {
-        await adminApi(`/api/admin/orders/${orderId}/payment`, {
+        await adminApi(`/api/admin/orders/${orderId}/cancel`, {
             method: 'PATCH',
-            body: JSON.stringify({ status: 'Paid' })
+            body: JSON.stringify({})
         });
         await loadAdminData();
         updateAdminStats();
-        renderAdminTabContent();
+        if (currentAdminTab === 'orders') await loadOrdersPage();
+        else renderAdminTabContent();
     } catch (error) {
-        console.error('Unable to confirm order payment.', error);
+        console.error('Unable to cancel order.', error);
         window.alert(error.message);
+    }
+}
+
+async function changeAdminPassword(event) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const status = document.getElementById('passwordChangeStatus');
+    try {
+        const result = await adminApi('/api/admin/password', {
+            method: 'PATCH',
+            body: JSON.stringify({
+                currentPassword: document.getElementById('currentAdminPassword').value,
+                newPassword: document.getElementById('newAdminPassword').value
+            })
+        });
+        status.textContent = result.message;
+        status.className = 'text-sm text-green-300 min-h-[20px]';
+        form.reset();
+    } catch (error) {
+        status.textContent = error.message;
+        status.className = 'text-sm text-red-300 min-h-[20px]';
     }
 }
 
@@ -811,7 +1047,8 @@ async function createNewWalkinModal() {
         });
         customersData.unshift(order);
         updateAdminStats();
-        renderAdminTabContent();
+        if (currentAdminTab === 'orders') await loadOrdersPage();
+        else renderAdminTabContent();
     } catch (error) {
         console.error('Unable to create walk-in registration.', error);
         window.alert(error.message);
@@ -851,6 +1088,8 @@ function exportDataCSV() {
 
 function updateAdminStats() {
     const totalRev = customersData.filter(order => order.status === 'Paid').reduce((acc, order) => acc + Number(order.total), 0);
+    pendingOrderCount = customersData.filter(order => order.status === 'Unpaid').length;
+    updatePendingOrderBadge();
     document.getElementById('statTotalRevenue').textContent = `₱${totalRev.toLocaleString()}`;
     document.getElementById('statActiveMembers').textContent = membersData.filter(isMemberActive).length;
     const today = getTodayDateString();
@@ -929,5 +1168,14 @@ window.onload = function () {
     bindAdminLoginForm();
     initializeAdminAccess();
     calculateTotal();
+    const startDateInput = document.getElementById('regStartDate');
+    if (startDateInput) {
+        const today = getTodayDateString();
+        startDateInput.min = today;
+        startDateInput.value = today;
+    }
+    document.getElementById('paymentConfirmationForm')?.addEventListener('submit', submitPaymentConfirmation);
+    document.getElementById('paymentMethod')?.addEventListener('change', updatePaymentReferenceRequirement);
+    document.addEventListener('keydown', handlePaymentModalKeydown);
     scheduleMemberDailyRefresh();
 };
