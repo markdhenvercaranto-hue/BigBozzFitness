@@ -13,6 +13,7 @@ let editingMemberId = null;
 let memberRefreshTimeout;
 let adminDataLoaded = false;
 let adminUnlocked = false;
+let mfaChallengePending = false;
 
 let currentAdminTab = 'customers';
 let revenueChart;
@@ -91,10 +92,7 @@ function openAdminLoginModal() {
     const modal = document.getElementById('adminLoginModal');
     if (modal) {
         modal.classList.remove('hidden');
-        const codeInput = document.getElementById('adminCode');
-        if (codeInput) {
-            setTimeout(() => codeInput.focus(), 100);
-        }
+        setTimeout(() => document.getElementById('adminUsername')?.focus(), 100);
     }
 }
 
@@ -105,9 +103,14 @@ function closeAdminLoginModal() {
     }
     const statusEl = document.getElementById('adminLoginStatus');
     if (statusEl) {
-        statusEl.textContent = 'Only enter this code on a device you trust. The dashboard summary remains public.';
+        statusEl.textContent = 'Only authorized administrators may sign in.';
         statusEl.className = 'text-xs text-gray-400 min-h-[20px]';
     }
+    mfaChallengePending = false;
+    document.getElementById('adminMfaStep')?.classList.add('hidden');
+    document.getElementById('adminMfaCode').required = false;
+    document.getElementById('adminMfaQr')?.classList.add('hidden');
+    document.getElementById('adminMfaSetupSecret')?.classList.add('hidden');
     const form = document.getElementById('adminLoginForm');
     if (form) {
         form.reset();
@@ -292,44 +295,62 @@ function bindAdminLoginForm() {
     form.addEventListener('submit', async function (event) {
         event.preventDefault();
 
-        const code = document.getElementById('adminCode').value;
         const statusEl = document.getElementById('adminLoginStatus');
-
-        if (!code) {
-            statusEl.textContent = 'Enter the admin code to unlock dashboard controls.';
-            statusEl.className = 'text-xs text-red-300 min-h-[20px]';
-            return;
-        }
-
         statusEl.textContent = 'Checking credentials...';
         statusEl.className = 'text-xs text-yellow-300 min-h-[20px]';
 
         try {
-            const response = await fetch('/api/admin/unlock', {
-                method: 'POST',
-                credentials: 'same-origin',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json'
-                },
-                body: JSON.stringify({ code })
-            });
+            let data;
+            if (!mfaChallengePending) {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({
+                        username: document.getElementById('adminUsername').value,
+                        password: document.getElementById('adminPassword').value
+                    })
+                });
+                data = await response.json();
+                if (!response.ok) throw new Error(data.message || 'Sign in failed.');
 
-            const data = await response.json();
-
-            if (!response.ok) {
-                statusEl.textContent = data.message || 'Access denied.';
-                statusEl.className = 'text-xs text-red-300 min-h-[20px]';
+                mfaChallengePending = true;
+                document.getElementById('adminMfaStep').classList.remove('hidden');
+                document.getElementById('adminMfaCode').required = true;
+                document.getElementById('adminMfaCode').focus();
+                if (data.mfaSetupRequired) {
+                    const qr = document.getElementById('adminMfaQr');
+                    qr.src = data.qrCodeDataUrl;
+                    qr.classList.remove('hidden');
+                    const secret = document.getElementById('adminMfaSetupSecret');
+                    secret.textContent = `Manual setup key: ${data.manualSecret}`;
+                    secret.classList.remove('hidden');
+                    statusEl.textContent = 'Scan the QR code, then enter the authenticator code to finish setup.';
+                } else {
+                    statusEl.textContent = 'Enter the current authenticator code or a recovery code.';
+                }
+                statusEl.className = 'text-xs text-yellow-300 min-h-[20px]';
                 return;
             }
 
+            const response = await fetch('/api/login/verify-mfa', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                body: JSON.stringify({ code: document.getElementById('adminMfaCode').value })
+            });
+            data = await response.json();
+            if (!response.ok) throw new Error(data.message || 'Verification failed.');
             statusEl.textContent = 'Admin controls unlocked. Opening dashboard...';
             statusEl.className = 'text-xs text-green-300 min-h-[20px]';
+            if (data.recoveryCodes) {
+                window.alert(`Save these one-time recovery codes in a secure place. They will not be shown again:\n\n${data.recoveryCodes.join('\n')}`);
+            }
             closeAdminLoginModal();
             adminUnlocked = true;
             await showSection('admin');
         } catch (error) {
-            statusEl.textContent = 'Unable to login right now. Please try again.';
+            statusEl.textContent = error.message || 'Unable to sign in right now. Please try again.';
             statusEl.className = 'text-xs text-red-300 min-h-[20px]';
         }
     });
@@ -709,6 +730,13 @@ function renderAdminTabContent() {
                     <p id="passwordChangeStatus" role="status" aria-live="polite" class="md:col-span-3 text-sm text-gray-400 min-h-[20px]"></p>
                 </form>
             </section>
+            <section class="bg-cardbg border border-red-900/60 p-6 rounded-2xl space-y-3">
+                <div>
+                    <h3 class="font-bold text-lg text-white">Admin sessions</h3>
+                    <p class="text-xs text-gray-400 mt-1">Immediately log out all signed-in admin devices.</p>
+                </div>
+                <button type="button" onclick="logoutAllAdminSessions()" class="border border-red-700 hover:bg-red-950 text-red-200 px-4 py-2.5 rounded-lg font-bold">Log out all sessions</button>
+            </section>
         `;
     } else if (currentAdminTab === 'reports') {
         container.innerHTML = `
@@ -738,13 +766,11 @@ async function renderAuditTab(container) {
         <div class="bg-cardbg border border-gray-800 rounded-2xl overflow-hidden">
             <div class="p-5 border-b border-gray-800 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                    <h3 class="font-bold text-lg text-white">Change History & Backups</h3>
-                    <p class="text-xs text-gray-400 mt-1">Recent member, payment, and backup actions are recorded here.</p>
+                    <h3 class="font-bold text-lg text-white">Change History</h3>
+                    <p class="text-xs text-gray-400 mt-1">Recent member, payment, and administrator actions are recorded here.</p>
                 </div>
-                <button onclick="createDatabaseBackup()" class="bg-gold-500 hover:bg-gold-600 text-black px-4 py-2.5 rounded-xl font-bold text-sm">
-                    <i class="fa-solid fa-database mr-1"></i>Create Backup
-                </button>
             </div>
+            <p class="px-5 py-3 text-xs text-gray-400 border-b border-gray-800">Database backups are managed by Turso. Configure Turso retention and keep an off-platform export for disaster recovery.</p>
             <div id="auditRows" class="divide-y divide-gray-800/60">
                 <p class="p-6 text-sm text-gray-400">Loading activity…</p>
             </div>
@@ -769,26 +795,6 @@ async function renderAuditTab(container) {
         console.error('Unable to load audit history.', error);
         const rows = document.getElementById('auditRows');
         if (rows) rows.innerHTML = `<p role="alert" class="p-6 text-sm text-red-300">${escapeHtml(error.message)}</p>`;
-    }
-}
-
-async function createDatabaseBackup() {
-    try {
-        const result = await adminApi('/api/admin/backups', {
-            method: 'POST',
-            body: JSON.stringify({})
-        });
-        const link = document.createElement('a');
-        link.href = `/api/admin/backups/${encodeURIComponent(result.filename)}`;
-        link.download = result.filename;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        if (currentAdminTab === 'audit') renderAuditTab(document.getElementById('adminTabContent'));
-        window.alert(`Backup downloaded and also saved on the server as ${result.filename}. Keep another copy somewhere safe.`);
-    } catch (error) {
-        console.error('Unable to create a database backup.', error);
-        window.alert(error.message);
     }
 }
 
@@ -1055,6 +1061,22 @@ async function changeAdminPassword(event) {
     } catch (error) {
         status.textContent = error.message;
         status.className = 'text-sm text-red-300 min-h-[20px]';
+    }
+}
+
+async function logoutAllAdminSessions() {
+    if (!window.confirm('Log out every admin session, including this device?')) return;
+    try {
+        await adminApi('/api/admin/sessions/revoke-all', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        closeAdminLoginModal();
+        adminUnlocked = false;
+        await showSection('admin');
+        window.alert('All admin sessions have been logged out.');
+    } catch (error) {
+        window.alert(error.message);
     }
 }
 

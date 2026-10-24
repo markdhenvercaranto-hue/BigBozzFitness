@@ -1,31 +1,63 @@
 const path = require('path');
-const fs = require('fs');
 const crypto = require('crypto');
 const dotenv = require('dotenv');
 
-const DEFAULT_PRIVATE_DIR = process.env.LOCALAPPDATA
-  ? path.join(process.env.LOCALAPPDATA, 'BigBozzFitness')
-  : path.join(__dirname, '..', 'bbf-private-data');
-const DEFAULT_ENV_FILE = process.env.LOCALAPPDATA
-  ? path.join(DEFAULT_PRIVATE_DIR, '.env')
-  : path.join(__dirname, '.env');
-
-dotenv.config({ path: process.env.ENV_FILE || DEFAULT_ENV_FILE });
+dotenv.config();
 
 const express = require('express');
 const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const OTPAuth = require('otpauth');
+const QRCode = require('qrcode');
 const { createDatabase } = require('./database');
 
-const DEFAULT_DATA_DIR = DEFAULT_PRIVATE_DIR;
-const MAX_BACKUP_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+const SESSION_ABSOLUTE_TIMEOUT_MS = 8 * 60 * 60 * 1000;
 const DUMMY_PASSWORD_HASH = bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 12);
 
-function isOutsidePublicDirectory(directory) {
-  const relativePath = path.relative(__dirname, directory);
-  return relativePath === '..' || relativePath.startsWith(`..${path.sep}`) || path.isAbsolute(relativePath);
+function encryptMfaSecret(secret, key) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  return JSON.stringify({
+    iv: iv.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+    ciphertext: ciphertext.toString('base64')
+  });
+}
+
+function decryptMfaSecret(encrypted, key) {
+  const stored = JSON.parse(encrypted);
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(stored.iv, 'base64'));
+  decipher.setAuthTag(Buffer.from(stored.tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(stored.ciphertext, 'base64')),
+    decipher.final()
+  ]).toString('utf8');
+}
+
+function createTotp(secret, username) {
+  return new OTPAuth.TOTP({
+    issuer: 'Big Bozz Fitness',
+    label: username,
+    algorithm: 'SHA1',
+    digits: 6,
+    period: 30,
+    secret: OTPAuth.Secret.fromBase32(secret)
+  });
+}
+
+function hashRecoveryCode(code) {
+  return crypto.createHash('sha256').update(code.replace(/[\s-]/g, '').toUpperCase()).digest('hex');
+}
+
+function generateRecoveryCodes() {
+  return Array.from({ length: 10 }, () => {
+    const code = crypto.randomBytes(16).toString('hex').toUpperCase();
+    return { code: `${code.slice(0, 8)}-${code.slice(8)}`, hash: hashRecoveryCode(code) };
+  });
 }
 
 function getTodayDateString() {
@@ -92,6 +124,17 @@ function mapOrder(row) {
   };
 }
 
+function mapAdminAccount(account) {
+  return {
+    id: account.id,
+    username: account.username,
+    role: account.role,
+    createdAt: account.createdAt,
+    disabled: Boolean(account.disabled),
+    mfaEnabled: Boolean(account.mfaEnabled)
+  };
+}
+
 function validateMemberInput(body) {
   const name = typeof body.name === 'string' ? body.name.trim() : '';
   const phone = typeof body.phone === 'string' ? body.phone.trim() : '';
@@ -107,39 +150,48 @@ function validateMemberInput(body) {
 }
 
 function createApplication(options = {}) {
-  const dataDirectory = options.dataDirectory
-    ? path.resolve(options.dataDirectory)
-    : process.env.DATA_DIR
-      ? path.resolve(__dirname, process.env.DATA_DIR)
-      : DEFAULT_DATA_DIR;
-  if (!isOutsidePublicDirectory(dataDirectory)) {
-    throw new Error('DATA_DIR must be outside the public application directory.');
-  }
-
-  const backupDirectory = path.join(dataDirectory, 'backups');
-  const adminUsername = options.adminUsername || process.env.ADMIN_USERNAME || 'owner';
-  const adminEmail = (options.adminEmail || process.env.ADMIN_EMAIL || 'owner@bigbozzfitness.com').toLowerCase();
-  const adminPassword = options.adminPassword || process.env.ADMIN_PASSWORD;
   const sessionSecret = options.sessionSecret || process.env.SESSION_SECRET;
+  const mfaEncryptionSecret = options.mfaEncryptionKey || process.env.MFA_ENCRYPTION_KEY;
   const isProduction = options.isProduction ?? process.env.NODE_ENV === 'production';
 
-  if (adminPassword && adminPassword.length < 12) {
-    throw new Error('Set ADMIN_PASSWORD to a password of at least 12 characters in the .env file.');
+  if (!sessionSecret || sessionSecret.length < 32 || new Set(sessionSecret).size < 12 || /change[_ -]?me|placeholder|example/i.test(sessionSecret)) {
+    throw new Error('Set SESSION_SECRET to a unique random value of at least 32 characters.');
   }
-  if (!sessionSecret || sessionSecret.length < 32) {
-    throw new Error('Set SESSION_SECRET to a random value of at least 32 characters in the .env file.');
+  if (!/^[0-9a-f]{64}$/i.test(mfaEncryptionSecret || '') || new Set(Buffer.from(mfaEncryptionSecret, 'hex')).size < 10) {
+    throw new Error('Set MFA_ENCRYPTION_KEY to a unique random 32-byte hex value.');
   }
+  if (isProduction && !options.database && !process.env.TURSO_DATABASE_URL) {
+    throw new Error('Set TURSO_DATABASE_URL in production; the local database fallback is for development only.');
+  }
+  if (isProduction && !options.database && !process.env.TURSO_AUTH_TOKEN) {
+    throw new Error('Set TURSO_AUTH_TOKEN in production.');
+  }
+  const mfaEncryptionKey = Buffer.from(mfaEncryptionSecret, 'hex');
 
-  const database = options.database || createDatabase(dataDirectory);
+  const database = options.database || createDatabase(options.databaseOptions);
   const app = express();
-  if (adminPassword) database.seedAdminPasswordHash(bcrypt.hashSync(adminPassword, 12));
-  if (!database.getAdminPasswordHash()) {
-    throw new Error('Set ADMIN_PASSWORD to seed the initial admin password.');
-  }
   const sessionStore = database.createSessionStore(session);
+  let databaseReady;
+  const initializeDatabase = () => {
+    if (!databaseReady) {
+      databaseReady = (async () => {
+        await database.initialize();
+        if (!await database.adminAccountCount()) {
+          throw new Error('No admin accounts exist. Run "npm run admin:create" to migrate the legacy owner account.');
+        }
+      })();
+    }
+    return databaseReady;
+  };
 
-  if (isProduction) app.set('trust proxy', 1);
+  app.set('trust proxy', 1);
   app.disable('x-powered-by');
+  app.use((req, res, next) => {
+    initializeDatabase().then(() => next()).catch(error => {
+      console.error('Database initialization failed.', error);
+      res.status(503).json({ message: 'The application database is unavailable.' });
+    });
+  });
   app.use(helmet({
     contentSecurityPolicy: {
       directives: {
@@ -165,11 +217,12 @@ function createApplication(options = {}) {
     store: sessionStore,
     resave: false,
     saveUninitialized: false,
+    rolling: true,
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
       secure: isProduction,
-      maxAge: 1000 * 60 * 60 * 8
+      maxAge: SESSION_IDLE_TIMEOUT_MS
     }
   }));
   app.use('/api/admin', (req, res, next) => {
@@ -193,6 +246,32 @@ function createApplication(options = {}) {
     res.set('Cache-Control', 'no-store');
     next();
   });
+  function enforceAdminSessionTimeout(req, res, next) {
+    if (!req.session || !req.session.isAuthenticated) return next();
+    const now = Date.now();
+    const authenticatedAt = Number(req.session.authenticatedAt);
+    const lastActivityAt = Number(req.session.lastActivityAt);
+    if (
+      !Number.isFinite(authenticatedAt) ||
+      !Number.isFinite(lastActivityAt) ||
+      now - authenticatedAt >= SESSION_ABSOLUTE_TIMEOUT_MS ||
+      now - lastActivityAt >= SESSION_IDLE_TIMEOUT_MS
+    ) {
+      return req.session.destroy(error => {
+        if (error) {
+          console.error('Unable to expire admin session.', error);
+          return res.status(500).json({ message: 'Unable to verify the admin session.' });
+        }
+        res.clearCookie('bbf.sid', { httpOnly: true, sameSite: 'lax', secure: isProduction });
+        if (req.baseUrl === '/admin') return res.redirect('/');
+        return res.status(401).json({ message: 'Admin session expired. Sign in again.' });
+      });
+    }
+    req.session.lastActivityAt = now;
+    return next();
+  }
+  app.use('/api/admin', enforceAdminSessionTimeout);
+  app.use('/admin', enforceAdminSessionTimeout);
 
   const loginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -209,25 +288,87 @@ function createApplication(options = {}) {
     message: { message: 'Too many registration attempts. Please try again later.' }
   });
 
-  app.get('/api/admin/stats', isAuthenticated, (req, res) => {
+  app.get('/api/admin/stats', isAuthenticated, async (req, res) => {
     try {
-      return res.json(database.stats(getTodayDateString()));
+      return res.json(await database.stats(getTodayDateString()));
     } catch (error) {
       return respondWithError(res, error);
     }
   });
 
-  app.get('/api/dashboard/overview', (req, res) => {
+  app.get('/api/dashboard/overview', async (req, res) => {
     try {
-      return res.set('Cache-Control', 'no-store').json(database.publicOverview(getTodayDateString()));
+      return res.set('Cache-Control', 'no-store').json(await database.publicOverview(getTodayDateString()));
     } catch (error) {
       return respondWithError(res, error);
     }
   });
 
-  function isAuthenticated(req, res, next) {
-    if (req.session && req.session.isAuthenticated) return next();
-    return res.status(401).json({ message: 'Unauthorized: admin access required.' });
+  async function isAuthenticated(req, res, next) {
+    try {
+      if (!req.session || !req.session.isAuthenticated || !req.session.user || !req.session.user.id) {
+        return res.status(401).json({ message: 'Unauthorized: admin access required.' });
+      }
+      const account = await database.getAdminAccountById(req.session.user.id);
+      if (!account || account.disabled) {
+        return req.session.destroy(() => res.status(401).json({ message: 'Unauthorized: admin access required.' }));
+      }
+      req.session.user = { id: account.id, username: account.username, role: account.role };
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  }
+
+  function requireOwner(req, res, next) {
+    if (req.session && req.session.user && req.session.user.role === 'owner') return next();
+    return res.status(403).json({ message: 'Owner access is required for this action.' });
+  }
+
+  function establishAdminSession(req, res, next, account, extra = {}) {
+    return req.session.regenerate(error => {
+      if (error) return next(error);
+      req.session.isAuthenticated = true;
+      req.session.user = { id: account.id, username: account.username, role: account.role };
+      req.session.authenticatedAt = Date.now();
+      req.session.lastActivityAt = req.session.authenticatedAt;
+      return req.session.save(saveError => {
+        if (saveError) return next(saveError);
+        return database.recordAudit(account.username, 'admin_login_succeeded', 'admin_account', account.id, {}).then(() => res.json({
+          success: true,
+          user: req.session.user,
+          message: 'Admin login successful.',
+          ...extra
+        }), next);
+      });
+    });
+  }
+
+  function beginMfaChallenge(req, res, next, account, setup) {
+    const createChallenge = async () => {
+      let responseFields = { mfaRequired: true };
+      let encryptedSecret;
+      if (setup) {
+        const secret = new OTPAuth.Secret({ size: 20 }).base32;
+        const totp = createTotp(secret, account.username);
+        encryptedSecret = encryptMfaSecret(secret, mfaEncryptionKey);
+        responseFields = {
+          mfaSetupRequired: true,
+          qrCodeDataUrl: await QRCode.toDataURL(totp.toString()),
+          manualSecret: secret
+        };
+      }
+      return req.session.regenerate(error => {
+        if (error) return next(error);
+        req.session.mfaPendingAdminId = account.id;
+        if (setup) req.session.mfaEnrollmentSecret = encryptedSecret;
+        return req.session.save(saveError => {
+          if (saveError) return next(saveError);
+          return res.json(responseFields);
+        });
+      });
+    };
+    return createChallenge().catch(next);
   }
 
   function respondWithError(res, error) {
@@ -235,59 +376,85 @@ function createApplication(options = {}) {
     return res.status(500).json({ message: 'The request could not be completed. Please try again.' });
   }
 
-  app.get('/api/session', (req, res) => {
-    res.json({
-      authenticated: !!(req.session && req.session.isAuthenticated),
-      user: req.session && req.session.user ? req.session.user : null
-    });
-  });
-
-  app.post('/api/login', loginLimiter, async (req, res, next) => {
+  app.get('/api/session', async (req, res, next) => {
     try {
-      const usernameOrEmail = String(req.body.usernameOrEmail || '').trim().toLowerCase();
-      const password = String(req.body.password || '');
-      const matchesAdminIdentity = usernameOrEmail === adminUsername.toLowerCase() || usernameOrEmail === adminEmail;
-      const isValidPassword = await bcrypt.compare(
-        password,
-        matchesAdminIdentity ? database.getAdminPasswordHash() : DUMMY_PASSWORD_HASH
-      );
-
-      if (!matchesAdminIdentity || !isValidPassword) {
-        database.recordFailedLogin(usernameOrEmail.slice(0, 120) || 'anonymous');
-        return res.status(401).json({ message: 'Invalid admin credentials.' });
-      }
-
-      return req.session.regenerate(error => {
-        if (error) return next(error);
-        req.session.isAuthenticated = true;
-        req.session.user = { username: adminUsername, email: adminEmail, role: 'owner' };
-        return req.session.save(saveError => {
-          if (saveError) return next(saveError);
-          return res.json({ success: true, user: req.session.user, message: 'Admin login successful.' });
-        });
-      });
+    const account = req.session && req.session.user
+      ? await database.getAdminAccountById(req.session.user.id)
+      : null;
+    const authenticated = Boolean(req.session && req.session.isAuthenticated && account && !account.disabled);
+    res.json({
+      authenticated,
+      user: authenticated ? { id: account.id, username: account.username, role: account.role } : null
+    });
     } catch (error) {
       return next(error);
     }
   });
 
-  app.post('/api/admin/unlock', loginLimiter, async (req, res, next) => {
+  app.post('/api/login', loginLimiter, async (req, res, next) => {
     try {
-      const code = typeof req.body.code === 'string' ? req.body.code : '';
-      const isValidCode = await bcrypt.compare(code, database.getAdminPasswordHash());
-      if (!isValidCode) {
-        database.recordFailedLogin('admin-code');
-        return res.status(401).json({ message: 'Invalid admin code.' });
+      const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
+      const password = typeof req.body.password === 'string' ? req.body.password : '';
+      const account = username ? await database.getAdminAccountByUsername(username) : null;
+      const isValidPassword = await bcrypt.compare(password, account ? account.passwordHash : DUMMY_PASSWORD_HASH);
+
+      if (!account || account.disabled || !isValidPassword) {
+        await database.recordFailedLogin(username.slice(0, 120) || 'anonymous');
+        return res.status(401).json({ message: 'Invalid admin credentials.' });
       }
-      return req.session.regenerate(error => {
-        if (error) return next(error);
-        req.session.isAuthenticated = true;
-        req.session.user = { username: adminUsername, email: adminEmail, role: 'owner' };
-        return req.session.save(saveError => {
-          if (saveError) return next(saveError);
-          return res.json({ success: true, user: req.session.user, message: 'Admin controls unlocked.' });
-        });
-      });
+      return beginMfaChallenge(req, res, next, account, !account.mfaEnabled);
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.post('/api/login/verify-mfa', loginLimiter, async (req, res, next) => {
+    try {
+      const adminId = req.session && req.session.mfaPendingAdminId;
+      const account = adminId ? await database.getAdminAccountById(adminId) : null;
+      const code = typeof req.body.code === 'string' ? req.body.code.trim() : '';
+      if (!account || account.disabled) {
+        await database.recordFailedLogin('mfa-challenge');
+        return res.status(401).json({ message: 'Invalid admin credentials or verification code.' });
+      }
+
+      if (req.session.mfaEnrollmentSecret) {
+        const secret = decryptMfaSecret(req.session.mfaEnrollmentSecret, mfaEncryptionKey);
+        const validToken = /^\d{6}$/.test(code) && createTotp(secret, account.username).validate({ token: code, window: 1 }) !== null;
+        if (!validToken) {
+          await database.recordFailedLogin(account.username);
+          return res.status(401).json({ message: 'Invalid admin credentials or verification code.' });
+        }
+        const recoveryCodes = generateRecoveryCodes();
+        if (!await database.enableAdminMfa(
+          account.id,
+          encryptMfaSecret(secret, mfaEncryptionKey),
+          recoveryCodes,
+          account.username
+        )) {
+          return res.status(401).json({ message: 'Invalid admin credentials or verification code.' });
+        }
+        return establishAdminSession(
+          req,
+          res,
+          next,
+          account,
+          { recoveryCodes: recoveryCodes.map(item => item.code) }
+        );
+      }
+
+      const secret = account.mfaEnabled && account.totpSecret
+        ? decryptMfaSecret(account.totpSecret, mfaEncryptionKey)
+        : null;
+      const validTotp = secret && /^\d{6}$/.test(code)
+        ? createTotp(secret, account.username).validate({ token: code, window: 1 }) !== null
+        : false;
+      const validRecoveryCode = validTotp ? false : await database.consumeAdminRecoveryCode(account.id, hashRecoveryCode(code));
+      if (!validTotp && !validRecoveryCode) {
+        await database.recordFailedLogin(account.username);
+        return res.status(401).json({ message: 'Invalid admin credentials or verification code.' });
+      }
+      return establishAdminSession(req, res, next, account);
     } catch (error) {
       return next(error);
     }
@@ -304,7 +471,7 @@ function createApplication(options = {}) {
     });
   });
 
-  app.post('/api/registrations', registrationLimiter, (req, res) => {
+  app.post('/api/registrations', registrationLimiter, async (req, res) => {
     try {
       const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
       const phone = typeof req.body.phone === 'string' ? req.body.phone.trim() : '';
@@ -328,7 +495,7 @@ function createApplication(options = {}) {
         return res.status(400).json({ message: 'Preferred start date must be a valid date today or later.' });
       }
 
-      const order = database.createOrder({
+      const order = await database.createOrder({
         receiptId: `BB-${crypto.randomBytes(5).toString('hex').toUpperCase()}`,
         name,
         phone,
@@ -346,15 +513,15 @@ function createApplication(options = {}) {
     }
   });
 
-  app.get('/api/admin/members', isAuthenticated, (req, res) => {
+  app.get('/api/admin/members', isAuthenticated, async (req, res) => {
     try {
-      return res.json(database.listMembers().map(mapMember));
+      return res.json((await database.listMembers()).map(mapMember));
     } catch (error) {
       return respondWithError(res, error);
     }
   });
 
-  app.post('/api/admin/members/import-legacy', isAuthenticated, (req, res) => {
+  app.post('/api/admin/members/import-legacy', isAuthenticated, async (req, res) => {
     try {
       if (!Array.isArray(req.body.members) || req.body.members.length > 1000) {
         return res.status(400).json({ message: 'Legacy member data must be an array of at most 1,000 members.' });
@@ -365,7 +532,7 @@ function createApplication(options = {}) {
         if (validation.error) return res.status(400).json({ message: validation.error });
         validatedMembers.push(validation.value);
       }
-      const result = database.importLegacyMembers(
+      const result = await database.importLegacyMembers(
         validatedMembers,
         req.session.user.username,
         calculateMembershipEndDate
@@ -380,11 +547,11 @@ function createApplication(options = {}) {
     }
   });
 
-  app.post('/api/admin/members', isAuthenticated, (req, res) => {
+  app.post('/api/admin/members', isAuthenticated, async (req, res) => {
     const validation = validateMemberInput(req.body);
     if (validation.error) return res.status(400).json({ message: validation.error });
     try {
-      const member = database.createMember({
+      const member = await database.createMember({
         id: crypto.randomUUID(),
         ...validation.value,
         endDate: calculateMembershipEndDate(validation.value.startDate, validation.value.membershipType)
@@ -395,11 +562,11 @@ function createApplication(options = {}) {
     }
   });
 
-  app.patch('/api/admin/members/:id', isAuthenticated, (req, res) => {
+  app.patch('/api/admin/members/:id', isAuthenticated, async (req, res) => {
     const validation = validateMemberInput(req.body);
     if (validation.error) return res.status(400).json({ message: validation.error });
     try {
-      const member = database.updateMember(req.params.id, {
+      const member = await database.updateMember(req.params.id, {
         ...validation.value,
         endDate: calculateMembershipEndDate(validation.value.startDate, validation.value.membershipType)
       }, req.session.user.username);
@@ -410,9 +577,9 @@ function createApplication(options = {}) {
     }
   });
 
-  app.post('/api/admin/members/:id/renew', isAuthenticated, (req, res) => {
+  app.post('/api/admin/members/:id/renew', isAuthenticated, async (req, res) => {
     try {
-      const member = database.renewMember(
+      const member = await database.renewMember(
         req.params.id,
         getTodayDateString(),
         calculateMembershipEndDate,
@@ -426,9 +593,9 @@ function createApplication(options = {}) {
     }
   });
 
-  app.delete('/api/admin/members/:id', isAuthenticated, (req, res) => {
+  app.delete('/api/admin/members/:id', isAuthenticated, async (req, res) => {
     try {
-      if (!database.deleteMember(req.params.id, req.session.user.username)) {
+      if (!await database.deleteMember(req.params.id, req.session.user.username)) {
         return res.status(404).json({ message: 'Member not found.' });
       }
       return res.status(204).end();
@@ -437,7 +604,7 @@ function createApplication(options = {}) {
     }
   });
 
-  app.get('/api/admin/orders', isAuthenticated, (req, res) => {
+  app.get('/api/admin/orders', isAuthenticated, async (req, res) => {
     try {
       const hasFilters = ['status', 'q', 'limit', 'offset'].some(key => Object.hasOwn(req.query, key));
       const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : 'All';
@@ -454,7 +621,7 @@ function createApplication(options = {}) {
       if (!Number.isInteger(offset) || offset < 0) {
         return res.status(400).json({ message: 'Offset must be a non-negative integer.' });
       }
-      const result = database.listOrders({
+      const result = await database.listOrders({
         status,
         query,
         limit: hasFilters ? limit : 10000,
@@ -468,7 +635,7 @@ function createApplication(options = {}) {
     }
   });
 
-  app.patch('/api/admin/orders/:id/payment', isAuthenticated, (req, res) => {
+  app.patch('/api/admin/orders/:id/payment', isAuthenticated, async (req, res) => {
     if (req.body.status !== 'Paid') {
       return res.status(400).json({ message: 'Payments can only be confirmed after collection; paid orders cannot be reverted here.' });
     }
@@ -477,7 +644,7 @@ function createApplication(options = {}) {
       return res.status(400).json({ message: 'Invalid order ID.' });
     }
     try {
-      const currentOrder = database.getOrder(orderId);
+      const currentOrder = await database.getOrder(orderId);
       if (!currentOrder) return res.status(404).json({ message: 'Order not found.' });
       if (currentOrder.status === 'Paid') return res.json(mapOrder(currentOrder));
       if (currentOrder.status === 'Cancelled') {
@@ -501,7 +668,7 @@ function createApplication(options = {}) {
       return res.status(400).json({ message: 'Reference numbers must be 50 characters or fewer; GCash requires one.' });
     }
     try {
-      const currentOrder = database.getOrder(orderId);
+      const currentOrder = await database.getOrder(orderId);
       const received = amountReceived === undefined ? currentOrder.total : amountReceived;
       if (typeof received !== 'number' || !Number.isFinite(received) || received < 0 || received > 1000000000) {
         return res.status(400).json({ message: 'Enter a valid amount received.' });
@@ -512,7 +679,7 @@ function createApplication(options = {}) {
           requiresMismatchConfirmation: true
         });
       }
-      const order = database.confirmPayment(
+      const order = await database.confirmPayment(
         orderId,
         getTodayDateString(),
         calculateMembershipEndDate,
@@ -528,11 +695,11 @@ function createApplication(options = {}) {
     }
   });
 
-  app.patch('/api/admin/orders/:id/cancel', isAuthenticated, (req, res) => {
+  app.patch('/api/admin/orders/:id/cancel', isAuthenticated, async (req, res) => {
     const orderId = Number(req.params.id);
     if (!Number.isSafeInteger(orderId) || orderId <= 0) return res.status(400).json({ message: 'Invalid order ID.' });
     try {
-      const result = database.cancelOrder(orderId, req.session.user.username);
+      const result = await database.cancelOrder(orderId, req.session.user.username);
       if (result.result === 'missing') return res.status(404).json({ message: 'Order not found.' });
       if (result.result === 'not_unpaid') return res.status(409).json({ message: 'Only unpaid orders can be cancelled.' });
       return res.json(mapOrder(result.order));
@@ -541,69 +708,126 @@ function createApplication(options = {}) {
     }
   });
 
-  app.patch('/api/admin/password', isAuthenticated, async (req, res) => {
+  app.patch('/api/admin/password', isAuthenticated, async (req, res, next) => {
     const currentPassword = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
     const newPassword = typeof req.body.newPassword === 'string' ? req.body.newPassword : '';
     if (newPassword.length < 12) return res.status(400).json({ message: 'New password must be at least 12 characters.' });
+    const currentUser = req.session.user;
     try {
-      if (!await bcrypt.compare(currentPassword, database.getAdminPasswordHash())) {
+      const account = await database.getAdminAccountById(currentUser.id);
+      if (!account || !await bcrypt.compare(currentPassword, account.passwordHash)) {
         return res.status(401).json({ message: 'Current password is incorrect.' });
       }
-      database.changeAdminPasswordHash(await bcrypt.hash(newPassword, 12), req.session.user.username);
-      return res.json({ success: true, message: 'Admin password updated.' });
-    } catch (error) {
-      return respondWithError(res, error);
-    }
-  });
-
-  app.get('/api/admin/audit', isAuthenticated, (req, res) => {
-    try {
-      return res.json(database.listAudit(100));
-    } catch (error) {
-      return respondWithError(res, error);
-    }
-  });
-
-  async function createBackup() {
-    await fs.promises.mkdir(backupDirectory, { recursive: true });
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `bigbozz-${stamp}.sqlite`;
-    const fullPath = path.join(backupDirectory, filename);
-    await database.backup(fullPath);
-    await removeOldBackups(backupDirectory);
-    return { filename, createdAt: new Date().toISOString() };
-  }
-
-  app.post('/api/admin/backups', isAuthenticated, async (req, res) => {
-    try {
-      const backup = await createBackup();
-      database.recordAudit(req.session.user.username, 'database_backup_created', 'database', 'sqlite', {
-        filename: backup.filename
+      await database.changeAdminAccountPassword(currentUser.id, await bcrypt.hash(newPassword, 12), currentUser.username);
+      return req.session.regenerate(error => {
+        if (error) return next(error);
+        req.session.isAuthenticated = true;
+        req.session.user = currentUser;
+        req.session.authenticatedAt = Date.now();
+        req.session.lastActivityAt = req.session.authenticatedAt;
+        return req.session.save(saveError => {
+          if (saveError) return next(saveError);
+          return sessionStore.destroyAdminSessions(currentUser.id, req.sessionID, revokeError => {
+            if (revokeError) return next(revokeError);
+            return res.json({ success: true, message: 'Password updated. Other sessions for your account have been logged out.' });
+          });
+        });
       });
-      return res.status(201).json({ success: true, ...backup });
     } catch (error) {
       return respondWithError(res, error);
     }
   });
 
-  app.get('/api/admin/backups/:filename', isAuthenticated, (req, res) => {
-    const filename = req.params.filename;
-    if (!/^bigbozz-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.sqlite$/.test(filename)) {
-      return res.status(400).json({ message: 'Invalid backup filename.' });
-    }
-    const fullPath = path.join(backupDirectory, filename);
-    return res.download(fullPath, filename, error => {
-      if (error && !res.headersSent) {
-        if (error.code === 'ENOENT') return res.status(404).json({ message: 'Backup file not found.' });
-        return respondWithError(res, error);
-      }
-      return undefined;
+  app.post('/api/admin/sessions/revoke-all', isAuthenticated, (req, res, next) => {
+    const adminId = req.session.user.id;
+    return sessionStore.destroyAdminSessions(adminId, null, error => {
+      if (error) return next(error);
+      return req.session.destroy(destroyError => {
+        if (destroyError) return next(destroyError);
+        res.clearCookie('bbf.sid', { httpOnly: true, sameSite: 'lax', secure: isProduction });
+        return res.json({ success: true, message: 'All sessions for your account have been logged out.' });
+      });
     });
+  });
+
+  app.get('/api/admin/accounts', isAuthenticated, requireOwner, async (req, res, next) => {
+    try {
+      return res.json(await database.listAdminAccounts());
+    } catch (error) {
+      return next(error);
+    }
+  });
+
+  app.post('/api/admin/accounts', isAuthenticated, requireOwner, async (req, res) => {
+    const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
+    const password = typeof req.body.password === 'string' ? req.body.password : '';
+    const role = req.body.role;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{2,31}$/.test(username)) {
+      return res.status(400).json({ message: 'Username must be 3–32 characters using letters, numbers, dots, underscores, or hyphens.' });
+    }
+    if (password.length < 12 || password.length > 1024) {
+      return res.status(400).json({ message: 'Password must be at least 12 characters and no more than 1,024 characters.' });
+    }
+    if (!['owner', 'staff'].includes(role)) {
+      return res.status(400).json({ message: 'Choose the owner or staff role.' });
+    }
+    try {
+      const account = await database.createAdminAccount({
+        id: crypto.randomUUID(),
+        username,
+        passwordHash: await bcrypt.hash(password, 12),
+        role
+      }, req.session.user.username);
+      return res.status(201).json(mapAdminAccount(account));
+    } catch (error) {
+      if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+        return res.status(409).json({ message: 'That username is already in use.' });
+      }
+      return respondWithError(res, error);
+    }
+  });
+
+  app.patch('/api/admin/accounts/:id', isAuthenticated, requireOwner, async (req, res, next) => {
+    const { role, disabled } = req.body;
+    if (role !== undefined && !['owner', 'staff'].includes(role)) {
+      return res.status(400).json({ message: 'Choose the owner or staff role.' });
+    }
+    if (disabled !== undefined && typeof disabled !== 'boolean') {
+      return res.status(400).json({ message: 'Disabled must be true or false.' });
+    }
+    if (req.params.id === req.session.user.id && disabled === true) {
+      return res.status(400).json({ message: 'You cannot disable the account currently in use.' });
+    }
+    try {
+      const account = await database.updateAdminAccount(req.params.id, { role, disabled }, req.session.user.username);
+      if (!account) return res.status(404).json({ message: 'Admin account not found.' });
+      if (account.disabled) {
+        return sessionStore.destroyAdminSessions(account.id, null, error => {
+          if (error) return next(error);
+          return res.json(mapAdminAccount(account));
+        });
+      }
+      return res.json(mapAdminAccount(account));
+    } catch (error) {
+      if (error.message === 'At least one active owner account must remain.') {
+        return res.status(409).json({ message: error.message });
+      }
+      return respondWithError(res, error);
+    }
+  });
+
+  app.get('/api/admin/audit', isAuthenticated, requireOwner, async (req, res) => {
+    try {
+      return res.json(await database.listAudit(100));
+    } catch (error) {
+      return respondWithError(res, error);
+    }
   });
 
   app.use('/api', (req, res) => res.status(404).json({ message: 'API endpoint not found.' }));
   app.get('/BBFDesign.css', (req, res) => res.sendFile(path.join(__dirname, 'BBFDesign.css')));
   app.get('/BBFfunc.js', (req, res) => res.sendFile(path.join(__dirname, 'BBFfunc.js')));
+  app.get('/BBFIndex.html', (req, res) => res.sendFile(path.join(__dirname, 'BBFIndex.html')));
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'BBFIndex.html')));
   app.get('/admin', (req, res) => {
     if (!req.session || !req.session.isAuthenticated) return res.redirect('/');
@@ -617,57 +841,31 @@ function createApplication(options = {}) {
   });
 
   app.locals.database = database;
-  app.locals.dataDirectory = dataDirectory;
-  app.locals.createBackup = createBackup;
-  app.locals.backupDirectory = backupDirectory;
+  app.locals.initializeDatabase = initializeDatabase;
+  Object.defineProperty(app.locals, 'databaseReady', { get: initializeDatabase });
   app.locals.sessionStore = sessionStore;
   return app;
 }
 
-async function removeOldBackups(directory) {
-  const files = await fs.promises.readdir(directory, { withFileTypes: true });
-  const oldestAllowed = Date.now() - MAX_BACKUP_AGE_MS;
-  await Promise.all(files
-    .filter(entry => entry.isFile() && /^bigbozz-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.sqlite$/.test(entry.name))
-    .map(async entry => {
-      const fullPath = path.join(directory, entry.name);
-      const stat = await fs.promises.stat(fullPath);
-      if (stat.mtimeMs < oldestAllowed) await fs.promises.unlink(fullPath);
-    }));
-}
+const app = createApplication();
+app.createApplication = createApplication;
+app.calculateMembershipEndDate = calculateMembershipEndDate;
+app.getTodayDateString = getTodayDateString;
+app.isValidDateString = isValidDateString;
 
-function scheduleDailyBackup(app) {
-  const now = new Date();
-  const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  const timer = setTimeout(async () => {
-    try {
-      const backup = await app.locals.createBackup();
-      app.locals.database.recordAudit('system', 'scheduled_database_backup_created', 'database', 'sqlite', {
-        filename: backup.filename
-      });
-      console.log(`Daily database backup created: ${backup.filename}`);
-    } catch (error) {
-      console.error('Daily database backup failed.', error);
-    } finally {
-      scheduleDailyBackup(app);
-    }
-  }, nextMidnight.getTime() - now.getTime());
-  timer.unref();
-}
+module.exports = app;
 
 if (require.main === module) {
   try {
-    const app = createApplication();
     const port = Number(process.env.PORT || 3000);
-    app.listen(port, () => {
+    app.locals.initializeDatabase().then(() => app.listen(port, () => {
       console.log(`Big Bozz Fitness is running on port ${port}.`);
-      console.log(`Data directory: ${app.locals.dataDirectory}`);
-      scheduleDailyBackup(app);
+    })).catch(error => {
+      console.error(error.message);
+      process.exitCode = 1;
     });
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
   }
 }
-
-module.exports = { createApplication, calculateMembershipEndDate, getTodayDateString, isValidDateString };

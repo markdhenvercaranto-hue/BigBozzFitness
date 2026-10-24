@@ -1,19 +1,18 @@
 # Big Bozz Fitness Operations Guide
 
-This guide covers local setup, membership handling, payment confirmation, backups, and day-to-day use of the gym dashboard.
+This guide covers local development, Vercel deployment, Turso database setup, membership handling, payment confirmation, and recovery.
 
 ## 1. First-time setup on Windows
 
-Use Node.js 20.19 or newer. From PowerShell, open the project folder and create a private configuration folder outside the OneDrive-synced project:
+Use Node.js 20.19 or newer. Copy `.env.example` to `.env` in the project folder and set the local secrets. Keep `.env` private; it is ignored by Git.
 
 ```powershell
-$privateDir = Join-Path $env:LOCALAPPDATA 'BigBozzFitness'
-New-Item -ItemType Directory -Force -Path $privateDir | Out-Null
-Copy-Item .env.example (Join-Path $privateDir '.env')
-node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+Copy-Item .env.example .env
+node -e "console.log(require('node:crypto').randomBytes(48).toString('hex'))"
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
 ```
 
-Open `%LOCALAPPDATA%\BigBozzFitness\.env` in a text editor. Replace `ADMIN_PASSWORD` with your own unique password (at least 12 characters). Paste the generated random value into `SESSION_SECRET`. On the first run, the app hashes `ADMIN_PASSWORD` into the private SQLite `admin_settings` table. After that, change passwords from **Security** in the dashboard; the saved hash is authoritative, and changing `.env` will not reset it. This keeps the secrets and private database outside the synced website project. Do not share `.env`.
+Put the first generated value in `SESSION_SECRET` and the second in `MFA_ENCRYPTION_KEY`. The latter must be exactly 64 hexadecimal characters. Leave `TURSO_DATABASE_URL` blank for local development; the app then uses `file:local.db`. To use a remote database locally, set both Turso variables. For first-owner setup, temporarily set `ADMIN_PASSWORD` to a unique password of at least 12 characters.
 
 Install the locked dependencies once, then start the app:
 
@@ -22,9 +21,9 @@ npm ci
 npm start
 ```
 
-Open `http://localhost:3000` in a browser. The Admin Dashboard opens in public read-only summary mode. Select **Enter Admin Code** and enter the current administrator password to unlock member records and management tools. Keep the server terminal running while using the dashboard. Stop it with Ctrl+C when finished.
+For a new database, create the first owner account with `npm run admin:create -- owner`, then start the app with `npm start`. Open `http://localhost:3000`. The first sign-in prompts you to enroll an authenticator app using a QR code and then displays one-time recovery codes. Store those codes securely. Remove `ADMIN_PASSWORD` from `.env` after account creation. Keep the server terminal running while using the dashboard; stop it with Ctrl+C.
 
-On Windows, the database and backups are stored under `%LOCALAPPDATA%\BigBozzFitness`, outside the OneDrive-synced website folder and outside the public web root. On other systems the default is a private sibling folder. Set `DATA_DIR` in the environment file only if you need a different private location; it must remain outside the application directory. `ENV_FILE` can point to an alternate configuration file.
+Local SQLite fallback is for development and tests only. A Vercel deployment must use Turso so data persists across serverless invocations.
 
 ## 2. Register and manage members
 
@@ -60,39 +59,38 @@ Confirmed payments update the revenue figures. A confirmed Monthly or 6-Month or
 This project does not connect to a bank, e-wallet, or payment gateway. Confirming payment is an admin record-keeping action; it is not proof that an online payment was received.
 Once marked Paid, an order cannot be reverted in this version. This avoids silently undoing recognized revenue or an active membership; record refunds or payment corrections separately until a dedicated refund workflow is added.
 
-When updating an existing installation, make a separate database backup before starting the new app version. The startup migration safely adds missing order columns and rebuilds the order status constraint to support Cancelled, preserving stored orders. Do not remove the original database until the app has started and you have checked members and orders.
+The Vercel/Turso setup creates the final schema for a fresh database. It does not automatically copy records from an older local SQLite database; plan and verify a data transfer before switching production traffic if existing member, order, or audit records must be retained.
 
 ## 4. Change history, exports, and backups
 
-**Audit & Backups** shows recent member, payment, and backup events, including before/after membership dates for edits and renewals. The log is restricted to the admin dashboard.
+**Audit** shows recent member, payment, and administrator events, including before/after membership dates for edits and renewals. The log is restricted to the admin dashboard.
 
-Open **Security** to change the administrator password (the admin code). The current password is verified and new passwords must be at least 12 characters. Failed code attempts are recorded without passwords. State-changing admin requests must come from the same origin and include the app's custom request header; the dashboard sends this automatically.
+The dashboard can export member and order data as CSV. Database backups are managed by Turso; configure its backup/restore options and retain an off-platform export for disaster recovery. The app does not write database backups to the Vercel function filesystem.
 
-- **Export Data** downloads a CSV containing the current member list and order history.
-- **Create Backup** creates a SQLite backup, downloads a copy to the admin's browser, and keeps the server copy under `%LOCALAPPDATA%\BigBozzFitness\backups` (or `DATA_DIR\backups` if configured).
-- The server also creates a backup at local midnight while it remains running. Backups older than 30 days are automatically removed.
-- Keep another backup copy somewhere separate from the computer hosting the app. Do not rely on the server copy if the computer or disk fails.
-
-To restore a backup, stop the server first. In File Explorer, copy the desired `.sqlite` backup from `%LOCALAPPDATA%\BigBozzFitness\backups` (or your configured data folder) to a safe folder, then copy that backup into the data folder and rename the copy to `bigbozz.sqlite`. Preserve the old database as a separate copy rather than deleting it. Start the server and verify members and orders before using the restored records.
+Open **Security** to change the administrator password. Changing it rotates the current session and logs out other devices. **Log out all sessions** ends every admin session, including the current device. Admin sessions expire after 30 minutes without admin activity and have an eight-hour absolute lifetime. Failed sign-in attempts are audited without recording passwords, MFA secrets, or recovery codes.
 
 ## 5. Deployment and security checklist
 
-Before making the website reachable from the public internet:
+### Deploying to Vercel and Turso
 
-1. Set `NODE_ENV=production`, use a long random `SESSION_SECRET`, and keep `ADMIN_PASSWORD` unique and private.
-2. Put the app behind an HTTPS reverse proxy and restrict access to the server and its data/backup folders. The production cookie is marked Secure, so the admin login requires HTTPS.
-3. Back up the database off the host regularly and test restoring a copy.
-4. Keep Node.js and npm dependencies up to date.
-5. Avoid running multiple app processes against the same SQLite file. This configuration is intended for a single app instance on one host.
-6. The current page loads Tailwind, icons, charts, and receipt-export libraries from public CDNs and uses inline event handlers. A stricter production setup should self-host or pin those front-end assets, replace inline event handlers, and tighten the content security policy.
-7. Use the dashboard as an operational tool, not as an audited accounting system or a substitute for a payment processor.
+1. Install the Turso CLI and authenticate using the official Turso instructions.
+2. Create a database: `turso db create bigbozz-fitness`.
+3. Get its URL with `turso db show --url bigbozz-fitness`.
+4. Create a database token with `turso db tokens create bigbozz-fitness`. Keep the token private.
+5. In the Vercel project settings, add `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`.
+6. Generate a 48-byte random hex value for `SESSION_SECRET` and a separate 32-byte random hex value for `MFA_ENCRYPTION_KEY`; add both to Vercel. Do not reuse or commit secrets.
+7. Before deployment, bootstrap the first owner against that Turso database from a trusted machine. Set the database URL, auth token, and a temporary `ADMIN_PASSWORD` in a local `.env`, then run `npm run admin:create -- owner`. Remove `ADMIN_PASSWORD` from all environments after the owner is created. This operation creates the final schema and first account.
+8. Deploy the project to Vercel. `vercel.json` routes requests to the Express function and includes the HTML/CSS/JS assets. Vercel serves production over HTTPS; the app trusts one proxy hop and marks production session cookies Secure, HttpOnly, and SameSite=Lax.
+9. Open the deployed site, sign in as the owner, enroll an authenticator, and securely save the displayed one-time recovery codes. Verify registrations, member creation, payment confirmation, audit history, and session logout before going live.
+10. Configure Turso backup retention and test a restore. Keep exports encrypted and off-platform; never assume a Vercel function's local filesystem persists between invocations.
 
-The SQLite file contains personal details and member history. Limit access to the host, `.env`, database, and backups to trusted staff.
+Required Vercel environment variables: `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `SESSION_SECRET`, and `MFA_ENCRYPTION_KEY`. `NODE_ENV` is supplied by Vercel, and `PORT` is managed by the platform. `ADMIN_PASSWORD` is only needed temporarily for initial owner creation.
 
 ## 6. Common problems
 
-- **The server says setup is incomplete:** on Windows, check `%LOCALAPPDATA%\BigBozzFitness\.env`; on other systems, check for `.env` beside `server.js` or confirm the `ENV_FILE` path. Verify that `ADMIN_PASSWORD` and `SESSION_SECRET` meet the minimum lengths.
+- **The server says setup is incomplete:** set a `SESSION_SECRET` of at least 32 characters and a 64-character hexadecimal `MFA_ENCRYPTION_KEY`. For Vercel, confirm the required environment variables are set for the deployment environment and redeploy after changing them.
 - **Port 3000 is in use:** change `PORT` in the environment file, restart the server, and open that port in the browser.
-- **A database path is rejected:** set `DATA_DIR` to a folder outside the project directory.
-- **A payment or member change does not save:** check the server terminal and available disk space. The interface reports the server error instead of pretending the save succeeded.
-- **An old member is missing after upgrade:** return to the browser that contained the old local data. Sign in and open Members there so its local records can be migrated; then verify the list.
+- **The database is unavailable:** verify `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN`, check Turso status, and redeploy after correcting variables.
+- **No owner account exists:** set the Turso variables locally and run `npm run admin:create -- owner` from a trusted machine.
+- **A payment or member change does not save:** check function logs and Turso connectivity. The interface reports server errors rather than pretending the save succeeded.
+- **Records from the old local SQLite file are missing in Turso:** the new database schema is created fresh and does not automatically import the old file. Keep the old database unchanged and arrange a verified data transfer before relying on the Turso deployment.

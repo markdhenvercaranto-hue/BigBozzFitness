@@ -1,315 +1,276 @@
-const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+const { createClient } = require('@libsql/client');
 
-function migrateOrders(connection) {
-  const migration = connection.transaction(() => {
-    const columns = new Set(connection.pragma('table_info(orders)').map(column => column.name));
-    const additions = [
-      ['email', 'TEXT'],
-      ['preferred_start_date', 'TEXT'],
-      ['payment_method', 'TEXT'],
-      ['payment_reference', 'TEXT'],
-      ['amount_received', 'REAL'],
-      ['paid_at', 'TEXT'],
-      ['confirmed_by', 'TEXT']
-    ];
-    for (const [name, type] of additions) {
-      if (!columns.has(name)) connection.exec(`ALTER TABLE orders ADD COLUMN ${name} ${type}`);
-    }
+const schema = [
+  `CREATE TABLE IF NOT EXISTS members (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    phone TEXT,
+    membership_type TEXT NOT NULL CHECK (membership_type IN ('monthly', '6month')),
+    start_date TEXT NOT NULL,
+    end_date TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  'CREATE INDEX IF NOT EXISTS members_end_date_idx ON members(end_date)',
+  'CREATE INDEX IF NOT EXISTS members_phone_idx ON members(phone)',
+  `CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    plan TEXT NOT NULL,
+    plan_key TEXT NOT NULL CHECK (plan_key IN ('walkin', 'monthly', '6month')),
+    trainer INTEGER NOT NULL DEFAULT 0 CHECK (trainer IN (0, 1)),
+    total INTEGER NOT NULL CHECK (total >= 0),
+    status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid', 'Cancelled')),
+    date TEXT NOT NULL,
+    member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    email TEXT,
+    preferred_start_date TEXT,
+    payment_method TEXT,
+    payment_reference TEXT,
+    amount_received REAL,
+    paid_at TEXT,
+    confirmed_by TEXT
+  )`,
+  'CREATE INDEX IF NOT EXISTS orders_date_idx ON orders(date)',
+  'CREATE INDEX IF NOT EXISTS orders_status_idx ON orders(status)',
+  `CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    details_json TEXT NOT NULL
+  )`,
+  'CREATE INDEX IF NOT EXISTS audit_created_at_idx ON audit_log(created_at)',
+  `CREATE TABLE IF NOT EXISTS sessions (
+    sid TEXT PRIMARY KEY,
+    sess TEXT NOT NULL,
+    expires INTEGER NOT NULL
+  )`,
+  'CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires)',
+  `CREATE TABLE IF NOT EXISTS admin_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS admin_accounts (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'staff')),
+    created_at TEXT NOT NULL,
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    totp_secret TEXT,
+    mfa_enabled INTEGER NOT NULL DEFAULT 0 CHECK (mfa_enabled IN (0, 1))
+  )`,
+  `CREATE TABLE IF NOT EXISTS admin_recovery_codes (
+    id TEXT PRIMARY KEY,
+    admin_id TEXT NOT NULL REFERENCES admin_accounts(id) ON DELETE CASCADE,
+    code_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    used_at TEXT,
+    UNIQUE (admin_id, code_hash)
+  )`,
+  'CREATE INDEX IF NOT EXISTS admin_recovery_admin_idx ON admin_recovery_codes(admin_id, used_at)'
+];
 
-    const table = connection.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'orders'").get();
-    if (!table || !table.sql.includes("'Cancelled'")) {
-      const orderIndexes = connection.prepare(`
-        SELECT name, sql FROM sqlite_master
-        WHERE type = 'index' AND tbl_name = 'orders' AND sql IS NOT NULL
-      `).all();
-      connection.exec(`
-        ALTER TABLE orders RENAME TO orders_before_cancelled_migration;
-        CREATE TABLE orders_migration_new (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          receipt_id TEXT NOT NULL UNIQUE,
-          name TEXT NOT NULL,
-          phone TEXT NOT NULL,
-          plan TEXT NOT NULL,
-          plan_key TEXT NOT NULL CHECK (plan_key IN ('walkin', 'monthly', '6month')),
-          trainer INTEGER NOT NULL DEFAULT 0 CHECK (trainer IN (0, 1)),
-          total INTEGER NOT NULL CHECK (total >= 0),
-          status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid', 'Cancelled')),
-          date TEXT NOT NULL,
-          member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
-          created_at TEXT NOT NULL,
-          email TEXT,
-          preferred_start_date TEXT,
-          payment_method TEXT,
-          payment_reference TEXT,
-          amount_received REAL,
-          paid_at TEXT,
-          confirmed_by TEXT
-        );
-        INSERT INTO orders_migration_new (
-          id, receipt_id, name, phone, plan, plan_key, trainer, total, status, date, member_id, created_at,
-          email, preferred_start_date, payment_method, payment_reference, amount_received, paid_at, confirmed_by
-        )
-        SELECT
-          id, receipt_id, name, phone, plan, plan_key, trainer, total, status, date, member_id, created_at,
-          email, preferred_start_date, payment_method, payment_reference, amount_received, paid_at, confirmed_by
-        FROM orders_before_cancelled_migration;
-        DROP TABLE orders_before_cancelled_migration;
-        ALTER TABLE orders_migration_new RENAME TO orders;
-        CREATE INDEX orders_date_idx ON orders(date);
-        CREATE INDEX orders_status_idx ON orders(status);
-      `);
-      for (const index of orderIndexes) {
-        if (!['orders_date_idx', 'orders_status_idx'].includes(index.name)) {
-          connection.exec(index.sql);
-        }
-      }
-    }
-  });
-  migration();
+function plainRow(row) {
+  return row ? { ...row } : null;
 }
 
-function createDatabase(dataDirectory) {
-  fs.mkdirSync(dataDirectory, { recursive: true });
-  const connection = new Database(path.join(dataDirectory, 'bigbozz.sqlite'));
-  connection.pragma('journal_mode = WAL');
-  connection.pragma('foreign_keys = ON');
-  connection.exec(`
-    CREATE TABLE IF NOT EXISTS members (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      phone TEXT,
-      membership_type TEXT NOT NULL CHECK (membership_type IN ('monthly', '6month')),
-      start_date TEXT NOT NULL,
-      end_date TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS members_end_date_idx ON members(end_date);
-    CREATE INDEX IF NOT EXISTS members_phone_idx ON members(phone);
+async function one(executor, sql, args = []) {
+  const result = await executor.execute({ sql, args });
+  return plainRow(result.rows[0]);
+}
 
-    CREATE TABLE IF NOT EXISTS orders (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      receipt_id TEXT NOT NULL UNIQUE,
-      name TEXT NOT NULL,
-      phone TEXT NOT NULL,
-      plan TEXT NOT NULL,
-      plan_key TEXT NOT NULL CHECK (plan_key IN ('walkin', 'monthly', '6month')),
-      trainer INTEGER NOT NULL DEFAULT 0 CHECK (trainer IN (0, 1)),
-      total INTEGER NOT NULL CHECK (total >= 0),
-      status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid', 'Cancelled')),
-      date TEXT NOT NULL,
-      member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
-      created_at TEXT NOT NULL,
-      email TEXT,
-      preferred_start_date TEXT,
-      payment_method TEXT,
-      payment_reference TEXT,
-      amount_received REAL,
-      paid_at TEXT,
-      confirmed_by TEXT
-    );
-    CREATE INDEX IF NOT EXISTS orders_date_idx ON orders(date);
-    CREATE INDEX IF NOT EXISTS orders_status_idx ON orders(status);
+async function all(executor, sql, args = []) {
+  const result = await executor.execute({ sql, args });
+  return result.rows.map(row => ({ ...row }));
+}
 
-    CREATE TABLE IF NOT EXISTS audit_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      created_at TEXT NOT NULL,
-      actor TEXT NOT NULL,
-      action TEXT NOT NULL,
-      entity_type TEXT NOT NULL,
-      entity_id TEXT NOT NULL,
-      details_json TEXT NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS audit_created_at_idx ON audit_log(created_at);
+async function run(executor, sql, args = []) {
+  return executor.execute({ sql, args });
+}
 
-    CREATE TABLE IF NOT EXISTS sessions (
-      sid TEXT PRIMARY KEY,
-      sess TEXT NOT NULL,
-      expires INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires);
-    CREATE TABLE IF NOT EXISTS admin_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-  `);
+function createDatabase(options = {}) {
+  const client = options.client || createClient({
+    url: process.env.TURSO_DATABASE_URL || 'file:local.db',
+    authToken: process.env.TURSO_AUTH_TOKEN
+  });
+  let initialization;
 
-  migrateOrders(connection);
-
-  const statements = {
-    insertMember: connection.prepare(`
-      INSERT INTO members (id, name, phone, membership_type, start_date, end_date, created_at, updated_at)
-      VALUES (@id, @name, @phone, @membershipType, @startDate, @endDate, @now, @now)
-    `),
-    selectMember: connection.prepare('SELECT * FROM members WHERE id = ?'),
-    listMembers: connection.prepare('SELECT * FROM members ORDER BY created_at DESC, rowid DESC'),
-    updateMember: connection.prepare(`
-      UPDATE members SET name = @name, phone = @phone, membership_type = @membershipType,
-        start_date = @startDate, end_date = @endDate, updated_at = @now
-      WHERE id = @id
-    `),
-    insertAudit: connection.prepare(`
-      INSERT INTO audit_log (created_at, actor, action, entity_type, entity_id, details_json)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `),
-    insertOrder: connection.prepare(`
-      INSERT INTO orders (
-        receipt_id, name, phone, plan, plan_key, trainer, total, status, date, created_at, email, preferred_start_date
-      ) VALUES (
-        @receiptId, @name, @phone, @plan, @planKey, @trainer, @total, 'Unpaid', @date, @createdAt, @email, @preferredStartDate
-      )
-    `),
-    selectOrder: connection.prepare('SELECT * FROM orders WHERE id = ?'),
-    listOrders: connection.prepare('SELECT * FROM orders ORDER BY created_at DESC, id DESC'),
-    countPendingOrders: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE status = 'Unpaid'"),
-    updateOrderPayment: connection.prepare(`
-      UPDATE orders SET status = 'Paid', member_id = ?, payment_method = ?, payment_reference = ?,
-        amount_received = ?, paid_at = ?, confirmed_by = ? WHERE id = ?
-    `),
-    cancelOrder: connection.prepare("UPDATE orders SET status = 'Cancelled' WHERE id = ? AND status = 'Unpaid'"),
-    getAdminPasswordHash: connection.prepare("SELECT value FROM admin_settings WHERE key = 'password_hash'"),
-    insertAdminPasswordHash: connection.prepare(`
-      INSERT OR IGNORE INTO admin_settings (key, value, updated_at) VALUES ('password_hash', ?, ?)
-    `),
-    updateAdminPasswordHash: connection.prepare(`
-      UPDATE admin_settings SET value = ?, updated_at = ? WHERE key = 'password_hash'
-    `),
-    listAudit: connection.prepare(`
-      SELECT id, created_at AS createdAt, actor, action, entity_type AS entityType,
-        entity_id AS entityId, details_json AS details
-      FROM audit_log ORDER BY id DESC LIMIT ?
-    `),
-    paidRevenue: connection.prepare("SELECT COALESCE(SUM(total), 0) AS total FROM orders WHERE status = 'Paid'"),
-    walkinsToday: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE plan_key = 'walkin' AND status = 'Paid' AND date = ?"),
-    trainerCount: connection.prepare("SELECT COUNT(*) AS count FROM orders WHERE trainer = 1 AND status = 'Paid'"),
-    activeCount: connection.prepare('SELECT COUNT(*) AS count FROM members WHERE end_date >= ?'),
-    findMemberByIdentity: connection.prepare(`
-      SELECT * FROM members WHERE phone = ? AND lower(name) = lower(?) ORDER BY updated_at DESC LIMIT 1
-    `),
-    findLegacyDuplicate: connection.prepare(`
-      SELECT id FROM members
-      WHERE lower(trim(name)) = lower(trim(?))
-        AND COALESCE(phone, '') = COALESCE(?, '')
-        AND membership_type = ? AND start_date = ? AND end_date = ?
-      LIMIT 1
-    `),
-    deleteMember: connection.prepare('DELETE FROM members WHERE id = ?'),
-    deleteExpiredSessions: connection.prepare('DELETE FROM sessions WHERE expires <= ?')
-  };
-  let sessionCleanupTimer;
-
-  function recordAudit(actor, action, entityType, entityId, details) {
-    statements.insertAudit.run(new Date().toISOString(), actor, action, entityType, String(entityId), JSON.stringify(details));
+  function initialize() {
+    if (!initialization) {
+      initialization = (async () => {
+        await client.execute('PRAGMA foreign_keys = ON');
+        await client.batch(schema.map(sql => ({ sql, args: [] })), 'write');
+      })();
+    }
+    return initialization;
   }
 
-  function memberSnapshot(member) {
-    return member ? {
-      id: member.id,
-      name: member.name,
-      phone: member.phone || '',
-      membershipType: member.membership_type,
-      startDate: member.start_date,
-      endDate: member.end_date
-    } : null;
+  async function recordAudit(actor, action, entityType, entityId, details, executor = client) {
+    return run(executor, `INSERT INTO audit_log
+      (created_at, actor, action, entity_type, entity_id, details_json)
+      VALUES (?, ?, ?, ?, ?, ?)`, [
+      new Date().toISOString(),
+      actor,
+      action,
+      entityType,
+      String(entityId),
+      JSON.stringify(details)
+    ]);
   }
 
-  function createMember(member, actor) {
-    const now = new Date().toISOString();
-    const record = { ...member, now };
-    const transaction = connection.transaction(() => {
-      statements.insertMember.run(record);
-      const inserted = statements.selectMember.get(member.id);
-      recordAudit(actor, 'member_created', 'member', member.id, { after: memberSnapshot(inserted) });
-      return inserted;
+  async function selectMember(executor, id) {
+    return one(executor, 'SELECT * FROM members WHERE id = ?', [id]);
+  }
+
+  async function selectOrder(executor, id) {
+    return one(executor, 'SELECT * FROM orders WHERE id = ?', [id]);
+  }
+
+  async function selectAdmin(executor, id) {
+    return one(executor, `SELECT id, username, password_hash AS passwordHash, role,
+      created_at AS createdAt, disabled, totp_secret AS totpSecret, mfa_enabled AS mfaEnabled
+      FROM admin_accounts WHERE id = ?`, [id]);
+  }
+
+  async function withWriteTransaction(work) {
+    await initialize();
+    const transaction = await client.transaction('write');
+    try {
+      const result = await work(transaction);
+      await transaction.commit();
+      return result;
+    } catch (error) {
+      try {
+        await transaction.rollback();
+      } catch (rollbackError) {
+        error.rollbackError = rollbackError;
+      }
+      throw error;
+    } finally {
+      await transaction.close();
+    }
+  }
+
+  async function removeAdminSessions(adminId, keepSid = null) {
+    await initialize();
+    return withWriteTransaction(async transaction => {
+      const sessions = await all(transaction, 'SELECT sid, sess FROM sessions');
+      for (const stored of sessions) {
+        const storedSession = JSON.parse(stored.sess);
+        if (storedSession.user && storedSession.user.id === adminId && stored.sid !== keepSid) {
+          await run(transaction, 'DELETE FROM sessions WHERE sid = ?', [stored.sid]);
+        }
+      }
     });
-    return transaction();
-  }
-
-  function publicOverview(today) {
-    return {
-      totalRevenue: statements.paidRevenue.get().total,
-      activeMembers: statements.activeCount.get(today).count,
-      walkinsToday: statements.walkinsToday.get(today).count,
-      trainerCount: statements.trainerCount.get().count
-    };
   }
 
   return {
-    createMember,
-    listMembers: () => statements.listMembers.all(),
-    publicOverview,
-    createOrder(order) {
-      const now = new Date().toISOString();
-      const transaction = connection.transaction(() => {
-        const result = statements.insertOrder.run({
-          ...order,
-          email: order.email || null,
-          preferredStartDate: order.preferredStartDate || null,
-          trainer: order.trainer ? 1 : 0,
-          createdAt: now
-        });
-        const inserted = statements.selectOrder.get(result.lastInsertRowid);
-        recordAudit('public', 'registration_received', 'order', inserted.id, {
-          receiptId: inserted.receipt_id,
-          plan: inserted.plan_key,
-          status: inserted.status
-        });
+    initialize,
+    async createMember(member, actor) {
+      return withWriteTransaction(async transaction => {
+        const now = new Date().toISOString();
+        await run(transaction, `INSERT INTO members
+          (id, name, phone, membership_type, start_date, end_date, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+          member.id, member.name, member.phone, member.membershipType, member.startDate,
+          member.endDate, now, now
+        ]);
+        const inserted = await selectMember(transaction, member.id);
+        await recordAudit(actor, 'member_created', 'member', member.id, { after: memberSnapshot(inserted) }, transaction);
         return inserted;
       });
-      return transaction();
     },
-    updateMember(id, changes, actor) {
-      const transaction = connection.transaction(() => {
-        const before = statements.selectMember.get(id);
+    async listMembers() {
+      await initialize();
+      return all(client, 'SELECT * FROM members ORDER BY created_at DESC, rowid DESC');
+    },
+    async publicOverview(today) {
+      await initialize();
+      const [revenue, active, walkins, trainers] = await Promise.all([
+        one(client, "SELECT COALESCE(SUM(total), 0) AS total FROM orders WHERE status = 'Paid'"),
+        one(client, 'SELECT COUNT(*) AS count FROM members WHERE end_date >= ?', [today]),
+        one(client, "SELECT COUNT(*) AS count FROM orders WHERE plan_key = 'walkin' AND status = 'Paid' AND date = ?", [today]),
+        one(client, 'SELECT COUNT(*) AS count FROM orders WHERE trainer = 1 AND status = \'Paid\'')
+      ]);
+      return {
+        totalRevenue: Number(revenue.total),
+        activeMembers: Number(active.count),
+        walkinsToday: Number(walkins.count),
+        trainerCount: Number(trainers.count)
+      };
+    },
+    async createOrder(order) {
+      return withWriteTransaction(async transaction => {
+        const now = new Date().toISOString();
+        const inserted = await run(transaction, `INSERT INTO orders (
+          receipt_id, name, phone, plan, plan_key, trainer, total, status, date, created_at, email, preferred_start_date
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'Unpaid', ?, ?, ?, ?)`, [
+          order.receiptId, order.name, order.phone, order.plan, order.planKey, order.trainer ? 1 : 0,
+          order.total, order.date, now, order.email || null, order.preferredStartDate || null
+        ]);
+        const row = await selectOrder(transaction, Number(inserted.lastInsertRowid));
+        await recordAudit('public', 'registration_received', 'order', row.id, {
+          receiptId: row.receipt_id,
+          plan: row.plan_key,
+          status: row.status
+        }, transaction);
+        return row;
+      });
+    },
+    async updateMember(id, changes, actor) {
+      return withWriteTransaction(async transaction => {
+        const before = await selectMember(transaction, id);
         if (!before) return null;
-        statements.updateMember.run({ ...changes, id, now: new Date().toISOString() });
-        const after = statements.selectMember.get(id);
-        recordAudit(actor, 'member_updated', 'member', id, {
+        await run(transaction, `UPDATE members SET name = ?, phone = ?, membership_type = ?,
+          start_date = ?, end_date = ?, updated_at = ? WHERE id = ?`, [
+          changes.name, changes.phone, changes.membershipType, changes.startDate, changes.endDate,
+          new Date().toISOString(), id
+        ]);
+        const after = await selectMember(transaction, id);
+        await recordAudit(actor, 'member_updated', 'member', id, {
           before: memberSnapshot(before),
           after: memberSnapshot(after)
-        });
+        }, transaction);
         return after;
       });
-      return transaction();
     },
-    renewMember(id, today, calculateEndDate, addDate, actor) {
-      const transaction = connection.transaction(() => {
-        const before = statements.selectMember.get(id);
+    async renewMember(id, today, calculateEndDate, addDate, actor) {
+      return withWriteTransaction(async transaction => {
+        const before = await selectMember(transaction, id);
         if (!before) return null;
         const startDate = before.end_date >= today ? addDate(before.end_date, 1) : today;
-        statements.updateMember.run({
-          id,
-          name: before.name,
-          phone: before.phone,
-          membershipType: before.membership_type,
-          startDate,
-          endDate: calculateEndDate(startDate, before.membership_type),
-          now: new Date().toISOString()
-        });
-        const after = statements.selectMember.get(id);
-        recordAudit(actor, 'member_renewed', 'member', id, {
+        const endDate = calculateEndDate(startDate, before.membership_type);
+        await run(transaction, `UPDATE members SET start_date = ?, end_date = ?, updated_at = ? WHERE id = ?`, [
+          startDate, endDate, new Date().toISOString(), id
+        ]);
+        const after = await selectMember(transaction, id);
+        await recordAudit(actor, 'member_renewed', 'member', id, {
           before: memberSnapshot(before),
           after: memberSnapshot(after)
-        });
+        }, transaction);
         return after;
       });
-      return transaction();
     },
-    deleteMember(id, actor) {
-      const transaction = connection.transaction(() => {
-        const before = statements.selectMember.get(id);
+    async deleteMember(id, actor) {
+      return withWriteTransaction(async transaction => {
+        const before = await selectMember(transaction, id);
         if (!before) return false;
-        statements.deleteMember.run(id);
-        recordAudit(actor, 'member_deleted', 'member', id, { before: memberSnapshot(before) });
+        await run(transaction, 'DELETE FROM members WHERE id = ?', [id]);
+        await recordAudit(actor, 'member_deleted', 'member', id, { before: memberSnapshot(before) }, transaction);
         return true;
       });
-      return transaction();
     },
-    listOrders(filters = {}) {
+    async listOrders(filters = {}) {
+      await initialize();
       const conditions = [];
       const values = [];
       if (filters.status && filters.status !== 'All') {
@@ -317,23 +278,26 @@ function createDatabase(dataDirectory) {
         values.push(filters.status);
       }
       if (filters.query) {
-        conditions.push("(lower(name) LIKE lower(?) OR lower(phone) LIKE lower(?) OR lower(receipt_id) LIKE lower(?))");
+        conditions.push('(lower(name) LIKE lower(?) OR lower(phone) LIKE lower(?) OR lower(receipt_id) LIKE lower(?))');
         const query = `%${filters.query}%`;
         values.push(query, query, query);
       }
       const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-      const total = connection.prepare(`SELECT COUNT(*) AS count FROM orders ${where}`).get(...values).count;
+      const total = await one(client, `SELECT COUNT(*) AS count FROM orders ${where}`, values);
       const limit = Number.isInteger(filters.limit) ? filters.limit : 10000;
       const offset = Number.isInteger(filters.offset) ? filters.offset : 0;
-      const orders = connection.prepare(`
-        SELECT * FROM orders ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
-      `).all(...values, limit, offset);
-      return { orders, total, pendingCount: statements.countPendingOrders.get().count };
+      const orders = await all(client, `SELECT * FROM orders ${where}
+        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, [...values, limit, offset]);
+      const pending = await one(client, "SELECT COUNT(*) AS count FROM orders WHERE status = 'Unpaid'");
+      return { orders, total: Number(total.count), pendingCount: Number(pending.count) };
     },
-    getOrder: id => statements.selectOrder.get(id),
-    confirmPayment(id, today, calculateEndDate, addDate, actor, payment) {
-      const transaction = connection.transaction(() => {
-        const order = statements.selectOrder.get(id);
+    async getOrder(id) {
+      await initialize();
+      return selectOrder(client, id);
+    },
+    async confirmPayment(id, today, calculateEndDate, addDate, actor, payment) {
+      return withWriteTransaction(async transaction => {
+        const order = await selectOrder(transaction, id);
         if (!order) return null;
         if (order.status === 'Paid') return order;
         if (order.status === 'Cancelled') {
@@ -348,48 +312,46 @@ function createDatabase(dataDirectory) {
           ? order.preferred_start_date
           : today;
         if (order.plan_key !== 'walkin') {
-          const existing = statements.findMemberByIdentity.get(order.phone, order.name.trim());
+          const existing = await one(transaction, `SELECT * FROM members
+            WHERE phone = ? AND lower(name) = lower(?) ORDER BY updated_at DESC LIMIT 1`, [
+            order.phone, order.name.trim()
+          ]);
           if (existing) {
             memberId = existing.id;
             memberBefore = memberSnapshot(existing);
             const startDate = existing.end_date >= today ? addDate(existing.end_date, 1) : preferredStartDate;
-            statements.updateMember.run({
-              id: memberId,
-              name: order.name,
-              phone: order.phone,
-              membershipType: order.plan_key,
-              startDate,
-              endDate: calculateEndDate(startDate, order.plan_key),
-              now: new Date().toISOString()
-            });
-            const updatedMember = statements.selectMember.get(memberId);
-            recordAudit(actor, 'membership_extended_by_payment', 'member', memberId, {
+            const endDate = calculateEndDate(startDate, order.plan_key);
+            await run(transaction, `UPDATE members SET name = ?, phone = ?, membership_type = ?,
+              start_date = ?, end_date = ?, updated_at = ? WHERE id = ?`, [
+              order.name, order.phone, order.plan_key, startDate, endDate, new Date().toISOString(), memberId
+            ]);
+            const updatedMember = await selectMember(transaction, memberId);
+            await recordAudit(actor, 'membership_extended_by_payment', 'member', memberId, {
               before: memberBefore,
               after: memberSnapshot(updatedMember),
               orderId: order.id
-            });
+            }, transaction);
           } else {
             memberId = crypto.randomUUID();
             const startDate = preferredStartDate;
-            statements.insertMember.run({
-              id: memberId,
-              name: order.name,
-              phone: order.phone,
-              membershipType: order.plan_key,
-              startDate,
-              endDate: calculateEndDate(startDate, order.plan_key),
-              now: new Date().toISOString()
-            });
-            const createdMember = statements.selectMember.get(memberId);
-            recordAudit(actor, 'membership_created_by_payment', 'member', memberId, {
+            const endDate = calculateEndDate(startDate, order.plan_key);
+            const now = new Date().toISOString();
+            await run(transaction, `INSERT INTO members
+              (id, name, phone, membership_type, start_date, end_date, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+              memberId, order.name, order.phone, order.plan_key, startDate, endDate, now, now
+            ]);
+            const createdMember = await selectMember(transaction, memberId);
+            await recordAudit(actor, 'membership_created_by_payment', 'member', memberId, {
               after: memberSnapshot(createdMember),
               orderId: order.id
-            });
+            }, transaction);
           }
         }
 
         const paidAt = new Date().toISOString();
-        statements.updateOrderPayment.run(
+        await run(transaction, `UPDATE orders SET status = 'Paid', member_id = ?, payment_method = ?,
+          payment_reference = ?, amount_received = ?, paid_at = ?, confirmed_by = ? WHERE id = ?`, [
           memberId,
           payment.paymentMethod,
           payment.paymentReference || null,
@@ -397,9 +359,9 @@ function createDatabase(dataDirectory) {
           paidAt,
           actor,
           id
-        );
-        const paidOrder = statements.selectOrder.get(id);
-        recordAudit(actor, 'payment_confirmed', 'order', id, {
+        ]);
+        const paidOrder = await selectOrder(transaction, id);
+        await recordAudit(actor, 'payment_confirmed', 'order', id, {
           receiptId: order.receipt_id,
           expectedAmount: order.total,
           paymentMethod: payment.paymentMethod,
@@ -409,165 +371,306 @@ function createDatabase(dataDirectory) {
           paidAt,
           confirmedBy: actor,
           memberId
-        });
+        }, transaction);
         return paidOrder;
       });
-      return transaction();
     },
-    cancelOrder(id, actor) {
-      const transaction = connection.transaction(() => {
-        const before = statements.selectOrder.get(id);
+    async cancelOrder(id, actor) {
+      return withWriteTransaction(async transaction => {
+        const before = await selectOrder(transaction, id);
         if (!before) return { result: 'missing' };
         if (before.status !== 'Unpaid') return { result: 'not_unpaid', order: before };
-        statements.cancelOrder.run(id);
-        const after = statements.selectOrder.get(id);
-        recordAudit(actor, 'order_cancelled', 'order', id, {
+        await run(transaction, "UPDATE orders SET status = 'Cancelled' WHERE id = ? AND status = 'Unpaid'", [id]);
+        const after = await selectOrder(transaction, id);
+        await recordAudit(actor, 'order_cancelled', 'order', id, {
           receiptId: before.receipt_id,
           previousStatus: before.status,
           status: after.status
-        });
+        }, transaction);
         return { result: 'cancelled', order: after };
       });
-      return transaction();
     },
-    seedAdminPasswordHash(passwordHash) {
-      const transaction = connection.transaction(() => {
-        const result = statements.insertAdminPasswordHash.run(passwordHash, new Date().toISOString());
-        if (result.changes) {
-          recordAudit('system', 'admin_password_seeded', 'admin_settings', 'password_hash', {
-            source: 'ADMIN_PASSWORD'
-          });
-        }
-        return statements.getAdminPasswordHash.get().value;
-      });
-      return transaction();
+    async seedAdminPasswordHash(passwordHash) {
+      await initialize();
+      await run(client, `INSERT OR IGNORE INTO admin_settings (key, value, updated_at)
+        VALUES ('password_hash', ?, ?)`, [passwordHash, new Date().toISOString()]);
+      const stored = await one(client, "SELECT value FROM admin_settings WHERE key = 'password_hash'");
+      return stored ? stored.value : null;
     },
-    getAdminPasswordHash() {
-      const row = statements.getAdminPasswordHash.get();
+    async getAdminPasswordHash() {
+      await initialize();
+      const row = await one(client, "SELECT value FROM admin_settings WHERE key = 'password_hash'");
       return row ? row.value : null;
     },
-    changeAdminPasswordHash(passwordHash, actor) {
-      const transaction = connection.transaction(() => {
-        statements.updateAdminPasswordHash.run(passwordHash, new Date().toISOString());
-        recordAudit(actor, 'admin_password_changed', 'admin_settings', 'password_hash', {
+    async changeAdminPasswordHash(passwordHash, actor) {
+      return withWriteTransaction(async transaction => {
+        await run(transaction, "UPDATE admin_settings SET value = ?, updated_at = ? WHERE key = 'password_hash'", [
+          passwordHash, new Date().toISOString()
+        ]);
+        await recordAudit(actor, 'admin_password_changed', 'admin_settings', 'password_hash', {
           changedAt: new Date().toISOString()
-        });
+        }, transaction);
       });
-      transaction();
     },
-    recordFailedLogin(actor) {
-      recordAudit(actor || 'anonymous', 'failed_login', 'admin', 'login', {
+    async createFirstAdmin({ id, username, passwordHash }) {
+      return withWriteTransaction(async transaction => {
+        const count = await one(transaction, 'SELECT COUNT(*) AS count FROM admin_accounts');
+        if (Number(count.count)) throw new Error('An admin account already exists.');
+        const legacyHash = await one(transaction, "SELECT value FROM admin_settings WHERE key = 'password_hash'");
+        const initialPasswordHash = legacyHash ? legacyHash.value : passwordHash;
+        if (!initialPasswordHash) throw new Error('No legacy admin password hash is available to migrate.');
+        const createdAt = new Date().toISOString();
+        await run(transaction, `INSERT INTO admin_accounts (id, username, password_hash, role, created_at)
+          VALUES (?, ?, ?, 'owner', ?)`, [id, username, initialPasswordHash, createdAt]);
+        await run(transaction, "DELETE FROM admin_settings WHERE key = 'password_hash'");
+        await recordAudit('system', 'legacy_admin_migrated', 'admin_account', id, {
+          username,
+          source: legacyHash ? 'legacy_password_hash' : 'bootstrap'
+        }, transaction);
+        return selectAdmin(transaction, id);
+      });
+    },
+    async adminAccountCount() {
+      await initialize();
+      const result = await one(client, 'SELECT COUNT(*) AS count FROM admin_accounts');
+      return Number(result.count);
+    },
+    async getAdminAccountById(id) {
+      await initialize();
+      return selectAdmin(client, id);
+    },
+    async getAdminAccountByUsername(username) {
+      await initialize();
+      return one(client, `SELECT id, username, password_hash AS passwordHash, role,
+        created_at AS createdAt, disabled, totp_secret AS totpSecret, mfa_enabled AS mfaEnabled
+        FROM admin_accounts WHERE username = ? COLLATE NOCASE`, [username]);
+    },
+    async listAdminAccounts() {
+      await initialize();
+      const accounts = await all(client, `SELECT id, username, role, created_at AS createdAt,
+        disabled, mfa_enabled AS mfaEnabled FROM admin_accounts ORDER BY created_at, username`);
+      return accounts.map(account => ({
+        ...account,
+        disabled: Boolean(account.disabled),
+        mfaEnabled: Boolean(account.mfaEnabled)
+      }));
+    },
+    async createAdminAccount({ id, username, passwordHash, role }, actor) {
+      return withWriteTransaction(async transaction => {
+        const createdAt = new Date().toISOString();
+        await run(transaction, `INSERT INTO admin_accounts
+          (id, username, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)`, [
+          id, username, passwordHash, role, createdAt
+        ]);
+        await recordAudit(actor, 'admin_account_created', 'admin_account', id, { username, role }, transaction);
+        return selectAdmin(transaction, id);
+      });
+    },
+    async updateAdminAccount(id, { role, disabled }, actor) {
+      return withWriteTransaction(async transaction => {
+        const current = await selectAdmin(transaction, id);
+        if (!current) return null;
+        const nextRole = role === undefined ? current.role : role;
+        const nextDisabled = disabled === undefined ? Number(current.disabled) : Number(disabled);
+        if (current.role === 'owner' && !current.disabled && (nextRole !== 'owner' || nextDisabled)) {
+          const activeOwners = await one(transaction, `
+            SELECT COUNT(*) AS count FROM admin_accounts WHERE role = 'owner' AND disabled = 0
+          `);
+          if (Number(activeOwners.count) <= 1) {
+            throw new Error('At least one active owner account must remain.');
+          }
+        }
+        await run(transaction, 'UPDATE admin_accounts SET role = ?, disabled = ? WHERE id = ?', [
+          nextRole, nextDisabled, id
+        ]);
+        await recordAudit(actor, 'admin_account_updated', 'admin_account', id, {
+          username: current.username,
+          role: nextRole,
+          disabled: Boolean(nextDisabled)
+        }, transaction);
+        const updated = await selectAdmin(transaction, id);
+        return { ...updated, disabled: Boolean(updated.disabled), mfaEnabled: Boolean(updated.mfaEnabled) };
+      });
+    },
+    async changeAdminAccountPassword(id, passwordHash, actor) {
+      return withWriteTransaction(async transaction => {
+        const current = await selectAdmin(transaction, id);
+        if (!current) return false;
+        await run(transaction, 'UPDATE admin_accounts SET password_hash = ? WHERE id = ?', [passwordHash, id]);
+        await recordAudit(actor, 'admin_password_changed', 'admin_account', id, {
+          changedAt: new Date().toISOString()
+        }, transaction);
+        return true;
+      });
+    },
+    async enableAdminMfa(id, encryptedSecret, recoveryCodes, actor) {
+      return withWriteTransaction(async transaction => {
+        const account = await selectAdmin(transaction, id);
+        if (!account || account.disabled) return false;
+        await run(transaction, 'UPDATE admin_accounts SET totp_secret = ?, mfa_enabled = 1 WHERE id = ?', [
+          encryptedSecret, id
+        ]);
+        await run(transaction, 'DELETE FROM admin_recovery_codes WHERE admin_id = ?', [id]);
+        const now = new Date().toISOString();
+        for (const code of recoveryCodes) {
+          await run(transaction, `INSERT INTO admin_recovery_codes
+            (id, admin_id, code_hash, created_at) VALUES (?, ?, ?, ?)`, [
+            crypto.randomUUID(), id, code.hash, now
+          ]);
+        }
+        await recordAudit(actor, 'admin_mfa_enabled', 'admin_account', id, {
+          recoveryCodeCount: recoveryCodes.length
+        }, transaction);
+        return true;
+      });
+    },
+    async consumeAdminRecoveryCode(id, codeHash) {
+      await initialize();
+      const result = await run(client, `UPDATE admin_recovery_codes SET used_at = ?
+        WHERE admin_id = ? AND code_hash = ? AND used_at IS NULL`, [
+        new Date().toISOString(), id, codeHash
+      ]);
+      return result.rowsAffected === 1;
+    },
+    async recordFailedLogin(actor) {
+      await initialize();
+      await recordAudit(actor || 'anonymous', 'failed_login', 'admin', 'login', {
         attemptedAt: new Date().toISOString()
       });
     },
-    listAudit(limit) {
-      return statements.listAudit.all(Math.min(Math.max(Number(limit) || 100, 1), 500))
-        .map(row => ({ ...row, details: JSON.parse(row.details) }));
+    async listAudit(limit) {
+      await initialize();
+      const boundedLimit = Math.min(Math.max(Number(limit) || 100, 1), 500);
+      const rows = await all(client, `SELECT id, created_at AS createdAt, actor, action,
+        entity_type AS entityType, entity_id AS entityId, details_json AS details
+        FROM audit_log ORDER BY id DESC LIMIT ?`, [boundedLimit]);
+      return rows.map(row => ({ ...row, details: JSON.parse(row.details) }));
     },
-    recordAudit,
-    stats(today) {
-      return publicOverview(today);
+    async recordAudit(actor, action, entityType, entityId, details) {
+      await initialize();
+      return recordAudit(actor, action, entityType, entityId, details);
     },
-    importLegacyMembers(members, actor, calculateEndDate) {
-      const transaction = connection.transaction(() => {
+    async stats(today) {
+      return this.publicOverview(today);
+    },
+    async importLegacyMembers(members, actor, calculateEndDate) {
+      return withWriteTransaction(async transaction => {
         const imported = [];
         let skippedCount = 0;
         for (const member of members) {
           const endDate = calculateEndDate(member.startDate, member.membershipType);
-          if (statements.findLegacyDuplicate.get(
+          const duplicate = await one(transaction, `SELECT id FROM members
+            WHERE lower(trim(name)) = lower(trim(?))
+              AND COALESCE(phone, '') = COALESCE(?, '')
+              AND membership_type = ? AND start_date = ? AND end_date = ? LIMIT 1`, [
             member.name, member.phone, member.membershipType, member.startDate, endDate
-          )) {
+          ]);
+          if (duplicate) {
             skippedCount += 1;
             continue;
           }
           const id = crypto.randomUUID();
           const now = new Date().toISOString();
-          statements.insertMember.run({
-            ...member,
-            id,
-            endDate,
-            now
-          });
-          const stored = statements.selectMember.get(id);
-          recordAudit(actor, 'legacy_member_imported', 'member', id, { after: memberSnapshot(stored) });
+          await run(transaction, `INSERT INTO members
+            (id, name, phone, membership_type, start_date, end_date, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [
+            id, member.name, member.phone, member.membershipType, member.startDate, endDate, now, now
+          ]);
+          const stored = await selectMember(transaction, id);
+          await recordAudit(actor, 'legacy_member_imported', 'member', id, {
+            after: memberSnapshot(stored)
+          }, transaction);
           imported.push(stored);
         }
         if (imported.length) {
-          recordAudit(actor, 'legacy_members_imported', 'member', 'legacy-import', {
+          await recordAudit(actor, 'legacy_members_imported', 'member', 'legacy-import', {
             importedCount: imported.length,
             skippedCount
-          });
+          }, transaction);
         }
-        return { members: statements.listMembers.all(), importedCount: imported.length, skippedCount };
+        const allMembers = await all(transaction, 'SELECT * FROM members ORDER BY created_at DESC, rowid DESC');
+        return { members: allMembers, importedCount: imported.length, skippedCount };
       });
-      return transaction();
     },
     createSessionStore(sessionLibrary) {
       const store = new sessionLibrary.Store();
-      sessionCleanupTimer = setInterval(() => {
-        try {
-          statements.deleteExpiredSessions.run(Date.now());
-        } catch (error) {
-          console.error('Unable to remove expired admin sessions.', error);
-        }
-      }, 60 * 60 * 1000);
-      sessionCleanupTimer.unref();
       store.get = (sid, callback) => {
-        try {
-          const row = connection.prepare('SELECT sess, expires FROM sessions WHERE sid = ?').get(sid);
-          if (!row) return callback(null, null);
-          if (row.expires <= Date.now()) {
-            connection.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
-            return callback(null, null);
+        (async () => {
+          await initialize();
+          const stored = await one(client, 'SELECT sess, expires FROM sessions WHERE sid = ?', [sid]);
+          if (!stored) return null;
+          if (Number(stored.expires) <= Date.now()) {
+            await run(client, 'DELETE FROM sessions WHERE sid = ?', [sid]);
+            return null;
           }
-          return callback(null, JSON.parse(row.sess));
-        } catch (error) {
-          return callback(error);
-        }
+          return JSON.parse(stored.sess);
+        })().then(value => callback(null, value), callback);
       };
       store.set = (sid, sess, callback = () => {}) => {
-        try {
+        (async () => {
+          await initialize();
           const expiration = sess.cookie && sess.cookie.expires
             ? new Date(sess.cookie.expires).getTime()
             : Date.now() + (sess.cookie && sess.cookie.originalMaxAge || 0);
-          connection.prepare(`
-            INSERT INTO sessions (sid, sess, expires) VALUES (?, ?, ?)
-            ON CONFLICT(sid) DO UPDATE SET sess = excluded.sess, expires = excluded.expires
-          `).run(sid, JSON.stringify(sess), expiration);
-          return callback(null);
-        } catch (error) {
-          return callback(error);
-        }
+          await run(client, `INSERT INTO sessions (sid, sess, expires) VALUES (?, ?, ?)
+            ON CONFLICT(sid) DO UPDATE SET sess = excluded.sess, expires = excluded.expires`, [
+            sid, JSON.stringify(sess), expiration
+          ]);
+          if (Math.random() < 0.02) await run(client, 'DELETE FROM sessions WHERE expires <= ?', [Date.now()]);
+        })().then(() => callback(null), callback);
       };
       store.touch = (sid, sess, callback = () => {}) => {
-        try {
+        (async () => {
+          await initialize();
           const expiration = sess.cookie && sess.cookie.expires
             ? new Date(sess.cookie.expires).getTime()
             : Date.now() + (sess.cookie && sess.cookie.originalMaxAge || 0);
-          connection.prepare('UPDATE sessions SET expires = ? WHERE sid = ?').run(expiration, sid);
-          return callback(null);
-        } catch (error) {
-          return callback(error);
-        }
+          await run(client, 'UPDATE sessions SET expires = ? WHERE sid = ?', [expiration, sid]);
+        })().then(() => callback(null), callback);
       };
       store.destroy = (sid, callback = () => {}) => {
-        try {
-          connection.prepare('DELETE FROM sessions WHERE sid = ?').run(sid);
-          return callback(null);
-        } catch (error) {
-          return callback(error);
-        }
+        (async () => {
+          await initialize();
+          await run(client, 'DELETE FROM sessions WHERE sid = ?', [sid]);
+        })().then(() => callback(null), callback);
       };
-      store.clearExpired = () => statements.deleteExpiredSessions.run(Date.now());
-      store.close = () => clearInterval(sessionCleanupTimer);
+      store.destroyAllExcept = (sid, callback = () => {}) => {
+        (async () => {
+          await initialize();
+          await run(client, 'DELETE FROM sessions WHERE sid != ?', [sid]);
+        })().then(() => callback(null), callback);
+      };
+      store.destroyAll = (callback = () => {}) => {
+        (async () => {
+          await initialize();
+          await run(client, 'DELETE FROM sessions');
+        })().then(() => callback(null), callback);
+      };
+      store.destroyAdminSessions = (adminId, keepSid = null, callback = () => {}) => {
+        removeAdminSessions(adminId, keepSid).then(() => callback(null), callback);
+      };
+      store.clearExpired = async () => {
+        await initialize();
+        return run(client, 'DELETE FROM sessions WHERE expires <= ?', [Date.now()]);
+      };
+      store.close = () => {};
       return store;
     },
-    backup: fullPath => connection.backup(fullPath),
-    close: () => {
-      if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
-      connection.close();
+    async close() {
+      return client.close();
     }
   };
+}
+
+function memberSnapshot(member) {
+  return member ? {
+    id: member.id,
+    name: member.name,
+    phone: member.phone || '',
+    membershipType: member.membership_type,
+    startDate: member.start_date,
+    endDate: member.end_date
+  } : null;
 }
 
 module.exports = { createDatabase };

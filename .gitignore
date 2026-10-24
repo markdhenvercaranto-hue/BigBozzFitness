@@ -6,4 +6,7 @@ npm-debug.log*
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+local.db
+*.db
+cookies.txt
 backups/

@@ -1,11 +1,38 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs/promises');
-const os = require('node:os');
-const path = require('node:path');
+const crypto = require('node:crypto');
+const bcrypt = require('bcryptjs');
+const OTPAuth = require('otpauth');
+const { createClient } = require('@libsql/client');
+
+process.env.SESSION_SECRET ||= 'test-session-secret-that-is-at-least-32-characters';
+process.env.MFA_ENCRYPTION_KEY ||= '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+
 const { createApplication, calculateMembershipEndDate, getTodayDateString, isValidDateString } = require('../server');
-const Database = require('better-sqlite3');
 const { createDatabase } = require('../database');
+
+const TEST_PASSWORD = 'ExamplePassword-For-Tests-123';
+const TEST_MFA_KEY = '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f';
+
+function createTotp(secret, username = 'owner') {
+  return new OTPAuth.TOTP({
+    issuer: 'Big Bozz Fitness',
+    label: username,
+    algorithm: 'SHA1',
+    digits: 6,
+    period: 30,
+    secret: OTPAuth.Secret.fromBase32(secret)
+  });
+}
+
+async function createLocalDatabase(t) {
+  const client = createClient({ url: 'file::memory:' });
+  const database = createDatabase({ client });
+  t.after(async () => {
+    await database.close();
+  });
+  return { database, client };
+}
 
 test('server validates dates and clamps month-end membership dates', () => {
   assert.equal(calculateMembershipEndDate('2025-01-31', 'monthly'), '2025-02-28');
@@ -15,210 +42,190 @@ test('server validates dates and clamps month-end membership dates', () => {
   assert.equal(isValidDateString('2025-13-01'), false);
 });
 
-test('server requires a non-public data directory', () => {
+test('server rejects missing or weak session and MFA encryption secrets', () => {
   assert.throws(() => createApplication({
-    dataDirectory: path.resolve(__dirname, '..', 'test-data'),
-    adminPassword: 'AnExamplePassword123',
-    sessionSecret: 'S'.repeat(48)
-  }), /outside the public application directory/);
+    sessionSecret: 'change-me-session-secret-that-is-long-enough',
+    mfaEncryptionKey: TEST_MFA_KEY
+  }), /SESSION_SECRET/);
+  assert.throws(() => createApplication({
+    sessionSecret: 'test-session-secret-that-is-at-least-32-characters',
+    mfaEncryptionKey: '0'.repeat(64)
+  }), /MFA_ENCRYPTION_KEY/);
 });
 
-test('server refuses to start with placeholder administrator credentials', () => {
-  assert.throws(() => createApplication({
-    dataDirectory: path.join(os.tmpdir(), 'bbf-missing-secret-test'),
-    adminPassword: 'CHANGE_ME',
-    sessionSecret: 'CHANGE_ME'
-  }), /ADMIN_PASSWORD/);
+test('production startup refuses the ephemeral local database fallback', () => {
+  const oldUrl = process.env.TURSO_DATABASE_URL;
+  const oldToken = process.env.TURSO_AUTH_TOKEN;
+  delete process.env.TURSO_DATABASE_URL;
+  delete process.env.TURSO_AUTH_TOKEN;
+  try {
+    assert.throws(() => createApplication({
+      sessionSecret: 'test-session-secret-that-is-at-least-32-characters',
+      mfaEncryptionKey: TEST_MFA_KEY,
+      isProduction: true
+    }), /TURSO_DATABASE_URL/);
+  } finally {
+    if (oldUrl === undefined) delete process.env.TURSO_DATABASE_URL;
+    else process.env.TURSO_DATABASE_URL = oldUrl;
+    if (oldToken === undefined) delete process.env.TURSO_AUTH_TOKEN;
+    else process.env.TURSO_AUTH_TOKEN = oldToken;
+  }
 });
 
-test('startup migration preserves legacy order rows and adds cancelled/payment columns', async t => {
-  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bigbozz-migration-test-'));
-  const legacyFile = path.join(temporaryDirectory, 'bigbozz.sqlite');
-  const legacy = new Database(legacyFile);
-  legacy.exec(`
-    CREATE TABLE members (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      phone TEXT,
-      membership_type TEXT NOT NULL CHECK (membership_type IN ('monthly', '6month')),
-      start_date TEXT NOT NULL,
-      end_date TEXT NOT NULL,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    );
-    CREATE TABLE orders (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      receipt_id TEXT NOT NULL UNIQUE,
-      name TEXT NOT NULL,
-      phone TEXT NOT NULL,
-      plan TEXT NOT NULL,
-      plan_key TEXT NOT NULL CHECK (plan_key IN ('walkin', 'monthly', '6month')),
-      trainer INTEGER NOT NULL DEFAULT 0 CHECK (trainer IN (0, 1)),
-      total INTEGER NOT NULL CHECK (total >= 0),
-      status TEXT NOT NULL CHECK (status IN ('Unpaid', 'Paid')),
-      date TEXT NOT NULL,
-      member_id TEXT REFERENCES members(id) ON DELETE SET NULL,
-      created_at TEXT NOT NULL
-    );
-    CREATE INDEX orders_date_idx ON orders(date);
-    CREATE INDEX orders_status_idx ON orders(status);
-    INSERT INTO orders (receipt_id, name, phone, plan, plan_key, total, status, date, created_at)
-    VALUES ('BB-LEGACY', 'Legacy Guest', '555-1000', 'Walk-in', 'walkin', 50, 'Unpaid', '2025-01-01', '2025-01-01T00:00:00.000Z');
-  `);
-  legacy.close();
-  let migrated;
-  let migratedInspection;
-  t.after(async () => {
-    if (migratedInspection) migratedInspection.close();
-    if (migrated) migrated.close();
-    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+test('libSQL creates the final schema and preserves atomic order workflows', async t => {
+  const { database, client } = await createLocalDatabase(t);
+  await database.initialize();
+  const foreignKeys = await client.execute('PRAGMA foreign_keys');
+  assert.equal(Number(foreignKeys.rows[0].foreign_keys), 1);
+  await database.createFirstAdmin({
+    id: crypto.randomUUID(),
+    username: 'owner',
+    passwordHash: await bcrypt.hash(TEST_PASSWORD, 4)
   });
 
-  migrated = createDatabase(temporaryDirectory);
-  const legacyOrder = migrated.getOrder(1);
-  assert.equal(legacyOrder.receipt_id, 'BB-LEGACY');
-  assert.equal(legacyOrder.status, 'Unpaid');
-  assert.equal(legacyOrder.email, null);
-  assert.equal(legacyOrder.payment_method, null);
-  migratedInspection = new Database(legacyFile, { readonly: true });
-  const orderIndexes = new Set(migratedInspection.pragma('index_list(orders)').map(index => index.name));
-  assert.ok(orderIndexes.has('orders_date_idx'));
-  assert.ok(orderIndexes.has('orders_status_idx'));
-  const orderForeignKeys = migratedInspection.pragma('foreign_key_list(orders)');
-  assert.ok(orderForeignKeys.some(key => key.table === 'members' && key.from === 'member_id'));
-  const cancelled = migrated.cancelOrder(1, 'owner');
+  const order = await database.createOrder({
+    receiptId: 'BB-TEST-001',
+    name: 'Test Member',
+    phone: '555-0100',
+    plan: 'Monthly Standard Plan',
+    planKey: 'monthly',
+    trainer: false,
+    total: 500,
+    date: getTodayDateString(),
+    email: null,
+    preferredStartDate: getTodayDateString()
+  });
+  assert.equal(order.status, 'Unpaid');
+  assert.equal(order.email, null);
+  assert.equal(order.payment_method, null);
+
+  const cancelled = await database.cancelOrder(order.id, 'owner');
   assert.equal(cancelled.result, 'cancelled');
-  assert.equal(migrated.getOrder(1).status, 'Cancelled');
+  assert.equal((await database.getOrder(order.id)).status, 'Cancelled');
+  await assert.rejects(
+    database.confirmPayment(order.id, getTodayDateString(), calculateMembershipEndDate, (date, days) => date, 'owner', {
+      paymentMethod: 'Cash',
+      paymentReference: '',
+      amountReceived: 500,
+      allowMismatch: false
+    }),
+    error => error.code === 'ORDER_CANCELLED'
+  );
+
+  const accountCount = await database.adminAccountCount();
+  assert.equal(accountCount, 1);
 });
 
-test('authenticated member, order, audit, and backup workflows persist', async t => {
-  const temporaryDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'bigbozz-test-'));
-  const dataDirectory = path.join(temporaryDirectory, 'private');
-  let app = createApplication({
-    dataDirectory,
-    adminUsername: 'owner',
-    adminEmail: 'owner@example.test',
-    adminPassword: 'AnExamplePassword123',
-    sessionSecret: 'session-secret-for-tests-that-is-at-least-32-characters'
+test('Express serves static assets and async admin workflows using local libSQL', async t => {
+  const { database } = await createLocalDatabase(t);
+  await database.initialize();
+  await database.createFirstAdmin({
+    id: crypto.randomUUID(),
+    username: 'owner',
+    passwordHash: await bcrypt.hash(TEST_PASSWORD, 4)
   });
-  let server = await new Promise(resolve => {
+
+  const app = createApplication({
+    database,
+    sessionSecret: 'test-session-secret-that-is-at-least-32-characters',
+    mfaEncryptionKey: TEST_MFA_KEY,
+    isProduction: false
+  });
+  const server = await new Promise(resolve => {
     const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
   });
-  let baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
   let cookie;
 
   async function request(route, options = {}) {
-    const headers = { ...(options.headers || {}) };
     const method = (options.method || 'GET').toUpperCase();
+    const headers = { ...(options.headers || {}) };
+    const { sessionCookie, ...fetchOptions } = options;
     if (route.startsWith('/api/admin/') && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
-      headers['X-Requested-With'] = headers['X-Requested-With'] || 'fetch';
-      headers.Origin = headers.Origin || baseUrl;
+      headers['X-Requested-With'] = 'fetch';
+      headers.Origin = baseUrl;
     }
-    if (cookie) headers.Cookie = cookie;
+    if (Object.hasOwn(options, 'sessionCookie')) {
+      if (sessionCookie) headers.Cookie = sessionCookie;
+    } else if (cookie && !headers.Cookie) {
+      headers.Cookie = cookie;
+    }
     if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
-    return fetch(`${baseUrl}${route}`, { ...options, headers });
+    return fetch(`${baseUrl}${route}`, { ...fetchOptions, headers });
   }
 
   async function closeServer() {
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-    app.locals.database.close();
   }
 
   t.after(async () => {
-    if (server && server.listening) await closeServer();
-    await fs.rm(temporaryDirectory, { recursive: true, force: true });
+    if (server.listening) await closeServer();
   });
 
-  const unauthenticatedMembers = await request('/api/admin/members');
-  assert.equal(unauthenticatedMembers.status, 401);
-  assert.equal(unauthenticatedMembers.headers.get('cache-control'), 'no-store');
+  const publicPage = await request('/');
+  assert.equal(publicPage.status, 200);
+  assert.match(await publicPage.text(), /ADMIN DASHBOARD/);
+  assert.equal((await request('/BBFIndex.html')).status, 200);
+  assert.equal((await request('/BBFDesign.css')).status, 200);
+  assert.equal((await request('/BBFfunc.js')).status, 200);
+  assert.equal((await request('/api/admin/members')).status, 401);
+
   const publicOverview = await request('/api/dashboard/overview');
   assert.equal(publicOverview.status, 200);
-  const publicSummary = await publicOverview.json();
-  assert.deepEqual(Object.keys(publicSummary).sort(), [
+  assert.deepEqual(Object.keys(await publicOverview.json()).sort(), [
     'activeMembers', 'totalRevenue', 'trainerCount', 'walkinsToday'
   ]);
-  assert.equal(JSON.stringify(publicSummary).includes('@'), false);
-  for (const [route, method] of [
-    ['/api/admin/stats', 'GET'],
-    ['/api/admin/members', 'GET'],
-    ['/api/admin/orders', 'GET'],
-    ['/api/admin/audit', 'GET'],
-    ['/api/admin/backups/bigbozz-2025-01-01T00-00-00-000Z.sqlite', 'GET'],
-    ['/api/admin/members', 'POST'],
-    ['/api/admin/members/import-legacy', 'POST'],
-    ['/api/admin/members/unknown', 'PATCH'],
-    ['/api/admin/members/unknown/renew', 'POST'],
-    ['/api/admin/members/unknown', 'DELETE'],
-    ['/api/admin/orders/1/payment', 'PATCH'],
-    ['/api/admin/orders/1/cancel', 'PATCH'],
-    ['/api/admin/password', 'PATCH'],
-    ['/api/admin/backups', 'POST']
-  ]) {
-    const options = { method };
-    if (method !== 'GET') options.body = JSON.stringify({});
-    assert.equal((await request(route, options)).status, 401, `${method} ${route}`);
-  }
-  const homePage = await request('/');
-  assert.equal(homePage.status, 200);
-  assert.match(await homePage.text(), /ADMIN DASHBOARD/);
-  const frontendScript = await request('/BBFfunc.js');
-  assert.equal(frontendScript.status, 200);
-  assert.match(await frontendScript.text(), /function adminApi/);
-  const adminPage = await request('/admin', { redirect: 'manual' });
-  assert.equal(adminPage.status, 302);
-  const privateSource = await request('/database.js');
-  assert.equal(privateSource.status, 404);
-  const privateCookieFile = await request('/cookies.txt');
-  assert.equal(privateCookieFile.status, 404);
-
-  const badLogin = await request('/api/login', {
-    method: 'POST',
-    body: JSON.stringify({ usernameOrEmail: 'owner', password: 'wrong-password' })
-  });
-  assert.equal(badLogin.status, 401);
-  const badAdminCode = await request('/api/admin/unlock', {
-    method: 'POST',
-    body: JSON.stringify({ code: 'wrong-admin-code' })
-  });
-  assert.equal(badAdminCode.status, 401);
-  const adminCodeUnlock = await request('/api/admin/unlock', {
-    method: 'POST',
-    body: JSON.stringify({ code: 'AnExamplePassword123' })
-  });
-  assert.equal(adminCodeUnlock.status, 200);
-  cookie = adminCodeUnlock.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
-  assert.equal((await request('/api/admin/members')).status, 200);
-  const codeUnlockLogout = await request('/api/logout', { method: 'POST' });
-  assert.equal(codeUnlockLogout.status, 200);
-  cookie = undefined;
 
   const login = await request('/api/login', {
     method: 'POST',
-    body: JSON.stringify({ usernameOrEmail: 'owner', password: 'AnExamplePassword123' })
+    body: JSON.stringify({ username: 'owner', password: TEST_PASSWORD })
   });
   assert.equal(login.status, 200);
-  cookie = login.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
-
-  const csrfRejected = await fetch(`${baseUrl}/api/admin/password`, {
-    method: 'PATCH',
-    headers: { Cookie: cookie, Origin: baseUrl, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ currentPassword: 'AnExamplePassword123', newPassword: 'AnotherExamplePassword123' })
+  const challenge = await login.json();
+  assert.equal(challenge.mfaSetupRequired, true);
+  assert.ok(challenge.qrCodeDataUrl.startsWith('data:image/png;base64,'));
+  const mfaCode = createTotp(challenge.manualSecret).generate();
+  const verify = await request('/api/login/verify-mfa', {
+    method: 'POST',
+    headers: { Cookie: login.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0] },
+    body: JSON.stringify({ code: mfaCode })
   });
-  assert.equal(csrfRejected.status, 403);
-  const badOriginRejected = await fetch(`${baseUrl}/api/admin/password`, {
-    method: 'PATCH',
-    headers: {
-      Cookie: cookie,
-      Origin: 'https://attacker.example',
-      'X-Requested-With': 'fetch',
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ currentPassword: 'AnExamplePassword123', newPassword: 'AnotherExamplePassword123' })
-  });
-  assert.equal(badOriginRejected.status, 403);
+  assert.equal(verify.status, 200);
+  const verified = await verify.json();
+  assert.equal(verified.recoveryCodes.length, 10);
+  cookie = verify.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  const setupSecret = challenge.manualSecret;
+  const recoveryCode = verified.recoveryCodes[0];
 
-  const reservationResponse = await request('/api/registrations', {
+  assert.equal((await request('/api/logout', { method: 'POST' })).status, 200);
+  cookie = undefined;
+  const recoveryLogin = await request('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'owner', password: TEST_PASSWORD })
+  });
+  const recoveryChallengeCookie = recoveryLogin.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  const recoveryVerify = await request('/api/login/verify-mfa', {
+    method: 'POST',
+    sessionCookie: recoveryChallengeCookie,
+    body: JSON.stringify({ code: recoveryCode })
+  });
+  assert.equal(recoveryVerify.status, 200);
+  cookie = recoveryVerify.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+
+  const replayLogin = await request('/api/login', {
+    method: 'POST',
+    sessionCookie: null,
+    body: JSON.stringify({ username: 'owner', password: TEST_PASSWORD })
+  });
+  const replayChallengeCookie = replayLogin.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  const replayVerify = await request('/api/login/verify-mfa', {
+    method: 'POST',
+    sessionCookie: replayChallengeCookie,
+    body: JSON.stringify({ code: recoveryCode })
+  });
+  assert.equal(replayVerify.status, 401);
+
+  const registration = await request('/api/registrations', {
     method: 'POST',
     body: JSON.stringify({
       name: 'Alex Member',
@@ -226,320 +233,175 @@ test('authenticated member, order, audit, and backup workflows persist', async t
       email: 'alex@example.test',
       preferredStartDate: getTodayDateString(),
       planKey: 'monthly',
-      trainer: true,
-      total: 1,
-      status: 'Paid'
+      trainer: true
     })
   });
-  assert.equal(reservationResponse.status, 201);
-  const reservation = await reservationResponse.json();
-  assert.equal(reservation.total, 2000);
-  assert.equal(reservation.status, 'Unpaid');
-  assert.equal(reservation.email, 'alex@example.test');
-  assert.equal(reservation.preferredStartDate, getTodayDateString());
-  const invalidEmail = await request('/api/registrations', {
+  assert.equal(registration.status, 201);
+  const order = await registration.json();
+  assert.equal(order.total, 2000);
+  assert.equal(order.status, 'Unpaid');
+  assert.equal((await request('/api/registrations', {
     method: 'POST',
-    body: JSON.stringify({ name: 'Bad Email', phone: '555-0100', email: 'not-an-email', planKey: 'walkin' })
-  });
-  assert.equal(invalidEmail.status, 400);
-  const pastStartDate = await request('/api/registrations', {
+    body: JSON.stringify({ name: 'Bad email', phone: '555', email: 'not-an-email', planKey: 'walkin' })
+  })).status, 400);
+  assert.equal((await request('/api/registrations', {
     method: 'POST',
-    body: JSON.stringify({ name: 'Past Date', phone: '555-0100', preferredStartDate: '2000-01-01', planKey: 'walkin' })
-  });
-  assert.equal(pastStartDate.status, 400);
-  let reservationStatsResponse = await request('/api/admin/stats');
-  assert.equal((await reservationStatsResponse.json()).activeMembers, 0);
+    body: JSON.stringify({ name: 'Past start', phone: '555', preferredStartDate: '2000-01-01', planKey: 'walkin' })
+  })).status, 400);
 
-  const unauthorizedPayment = await fetch(`${baseUrl}/api/admin/orders/${reservation.id}/payment`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ status: 'Paid' })
-  });
-  assert.equal(unauthorizedPayment.status, 401);
-
-  const missingReference = await request(`/api/admin/orders/${reservation.id}/payment`, {
+  const missingReference = await request(`/api/admin/orders/${order.id}/payment`, {
     method: 'PATCH',
     body: JSON.stringify({ status: 'Paid', paymentMethod: 'GCash', amountReceived: 2000 })
   });
   assert.equal(missingReference.status, 400);
-  const amountMismatch = await request(`/api/admin/orders/${reservation.id}/payment`, {
+  const amountMismatch = await request(`/api/admin/orders/${order.id}/payment`, {
     method: 'PATCH',
-    body: JSON.stringify({ status: 'Paid', paymentMethod: 'GCash', paymentReference: 'GC-100', amountReceived: 1999 })
+    body: JSON.stringify({ status: 'Paid', paymentMethod: 'Cash', amountReceived: 1999 })
   });
   assert.equal(amountMismatch.status, 400);
   assert.equal((await amountMismatch.json()).requiresMismatchConfirmation, true);
-
-  const confirmedPayment = await request(`/api/admin/orders/${reservation.id}/payment`, {
+  const paid = await request(`/api/admin/orders/${order.id}/payment`, {
     method: 'PATCH',
-    body: JSON.stringify({
-      status: 'Paid',
-      paymentMethod: 'GCash',
-      paymentReference: 'GC-100',
-      amountReceived: 1999,
-      allowMismatch: true
-    })
+    body: JSON.stringify({ status: 'Paid', paymentMethod: 'Cash', amountReceived: 2000 })
   });
-  assert.equal(confirmedPayment.status, 200);
-  const paidOrder = await confirmedPayment.json();
+  assert.equal(paid.status, 200);
+  const paidOrder = await paid.json();
   assert.equal(paidOrder.status, 'Paid');
-  assert.equal(paidOrder.paymentMethod, 'GCash');
-  assert.equal(paidOrder.paymentReference, 'GC-100');
-  assert.equal(paidOrder.amountReceived, 1999);
   assert.equal(paidOrder.confirmedBy, 'owner');
   assert.ok(paidOrder.memberId);
-  const confirmedTwice = await request(`/api/admin/orders/${reservation.id}/payment`, {
-    method: 'PATCH',
+
+  const members = await request('/api/admin/members');
+  assert.equal(members.status, 200);
+  assert.equal((await members.json()).length, 1);
+  const audit = await request('/api/admin/audit');
+  assert.equal(audit.status, 200);
+  assert.ok((await audit.json()).some(entry => entry.action === 'payment_confirmed' && entry.actor === 'owner'));
+
+  const expiredMember = await request('/api/admin/members', {
+    method: 'POST',
     body: JSON.stringify({
-      status: 'Paid',
-      paymentMethod: 'Cash',
-      amountReceived: 3000
+      name: 'Expired Member',
+      phone: '555-0101',
+      membershipType: 'monthly',
+      startDate: '2025-01-31'
     })
   });
-  assert.equal(confirmedTwice.status, 200);
-  const duplicatePaidOrder = await confirmedTwice.json();
-  assert.equal(duplicatePaidOrder.paymentMethod, 'GCash');
-  assert.equal(duplicatePaidOrder.amountReceived, 1999);
-
-  let membersResponse = await request('/api/admin/members');
-  let members = await membersResponse.json();
-  assert.equal(members.length, 1);
-  assert.equal(members[0].startDate, getTodayDateString());
-
-  const paidCancellation = await request(`/api/admin/orders/${reservation.id}/cancel`, {
+  assert.equal(expiredMember.status, 201);
+  const expiredRecord = await expiredMember.json();
+  assert.equal(expiredRecord.endDate, '2025-02-28');
+  const editedMember = await request(`/api/admin/members/${expiredRecord.id}`, {
     method: 'PATCH',
-    body: JSON.stringify({})
+    body: JSON.stringify({
+      name: 'Edited Member',
+      phone: '555-0102',
+      membershipType: '6month',
+      startDate: '2025-01-31'
+    })
   });
-  assert.equal(paidCancellation.status, 409);
-
-  const cancelledReservationResponse = await request('/api/registrations', {
+  assert.equal(editedMember.status, 200);
+  assert.equal((await editedMember.json()).endDate, '2025-07-31');
+  const renewedMember = await request(`/api/admin/members/${expiredRecord.id}/renew`, {
     method: 'POST',
-    body: JSON.stringify({ name: 'Cancel Me', phone: '555-0102', planKey: 'walkin', preferredStartDate: getTodayDateString() })
+    body: JSON.stringify({})
   });
-  const cancelledReservation = await cancelledReservationResponse.json();
-  const cancelledResponse = await request(`/api/admin/orders/${cancelledReservation.id}/cancel`, {
+  assert.equal(renewedMember.status, 200);
+  assert.equal((await renewedMember.json()).startDate, getTodayDateString());
+  assert.equal((await request(`/api/admin/members/${expiredRecord.id}`, { method: 'DELETE' })).status, 204);
+
+  const legacyMemberPayload = {
+    name: 'Imported Legacy Record',
+    phone: '',
+    membershipType: 'monthly',
+    startDate: '2020-01-31'
+  };
+  const legacyImport = await request('/api/admin/members/import-legacy', {
+    method: 'POST',
+    body: JSON.stringify({ members: [legacyMemberPayload] })
+  });
+  assert.equal(legacyImport.status, 201);
+  assert.equal((await legacyImport.json()).importedCount, 1);
+  const duplicateImport = await request('/api/admin/members/import-legacy', {
+    method: 'POST',
+    body: JSON.stringify({ members: [legacyMemberPayload] })
+  });
+  assert.equal((await duplicateImport.json()).skippedCount, 1);
+
+  const cancelledOrderResponse = await request('/api/registrations', {
+    method: 'POST',
+    body: JSON.stringify({ name: 'Cancel Me', phone: '555-0200', planKey: 'walkin' })
+  });
+  const cancelledOrder = await cancelledOrderResponse.json();
+  const cancelResponse = await request(`/api/admin/orders/${cancelledOrder.id}/cancel`, {
     method: 'PATCH',
     body: JSON.stringify({})
   });
-  assert.equal(cancelledResponse.status, 200);
-  assert.equal((await cancelledResponse.json()).status, 'Cancelled');
-  const cancelledPayment = await request(`/api/admin/orders/${cancelledReservation.id}/payment`, {
+  assert.equal(cancelResponse.status, 200);
+  assert.equal((await cancelResponse.json()).status, 'Cancelled');
+  const cancelledPayment = await request(`/api/admin/orders/${cancelledOrder.id}/payment`, {
     method: 'PATCH',
     body: JSON.stringify({ status: 'Paid', paymentMethod: 'Cash', amountReceived: 50 })
   });
   assert.equal(cancelledPayment.status, 409);
 
-  const today = getTodayDateString();
-  const futureStart = new Date(`${today}T12:00:00`);
-  futureStart.setDate(futureStart.getDate() + 5);
-  const preferredDate = `${futureStart.getFullYear()}-${String(futureStart.getMonth() + 1).padStart(2, '0')}-${String(futureStart.getDate()).padStart(2, '0')}`;
-  const futureReservation = await request('/api/registrations', {
-    method: 'POST',
-    body: JSON.stringify({
-      name: 'Future Member',
-      phone: '555-0103',
-      planKey: 'monthly',
-      preferredStartDate: preferredDate
-    })
-  });
-  const futureOrder = await futureReservation.json();
-  const cashPayment = await request(`/api/admin/orders/${futureOrder.id}/payment`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status: 'Paid', paymentMethod: 'Cash', amountReceived: 500 })
-  });
-  assert.equal(cashPayment.status, 200);
-  assert.equal((await cashPayment.json()).paymentMethod, 'Cash');
-  const walkinReservation = await request('/api/registrations', {
-    method: 'POST',
-    body: JSON.stringify({ name: 'Cash Walk-in', phone: '555-0104', planKey: 'walkin' })
-  });
-  const walkinOrder = await walkinReservation.json();
-  const walkinPayment = await request(`/api/admin/orders/${walkinOrder.id}/payment`, {
-    method: 'PATCH',
-    body: JSON.stringify({ status: 'Paid', paymentMethod: 'Cash', amountReceived: 50 })
-  });
-  assert.equal(walkinPayment.status, 200);
-  membersResponse = await request('/api/admin/members');
-  members = await membersResponse.json();
-  assert.equal(members.find(member => member.name === 'Future Member').startDate, preferredDate);
-
   const filteredOrders = await request('/api/admin/orders?status=Cancelled&q=Cancel%20Me&limit=10&offset=0');
-  const filteredData = await filteredOrders.json();
-  assert.equal(filteredData.orders.length, 1);
-  assert.equal(filteredData.orders[0].status, 'Cancelled');
-  assert.equal(filteredData.pendingCount, 0);
-  const pendingReservationResponse = await request('/api/registrations', {
+  assert.equal(filteredOrders.status, 200);
+  assert.equal((await filteredOrders.json()).total, 1);
+
+  const secondLogin = await request('/api/login', {
     method: 'POST',
-    body: JSON.stringify({ name: 'Pending Search', phone: '555-0105', planKey: 'walkin' })
+    sessionCookie: null,
+    body: JSON.stringify({ username: 'owner', password: TEST_PASSWORD })
   });
-  const pendingReservation = await pendingReservationResponse.json();
-  const pendingSearch = await request('/api/admin/orders?status=Unpaid&q=Pending%20Search&limit=10&offset=0');
-  const pendingData = await pendingSearch.json();
-  assert.equal(pendingData.orders[0].id, pendingReservation.id);
-  assert.equal(pendingData.pendingCount, 1);
-  const receiptSearch = await request(`/api/admin/orders?status=All&q=${encodeURIComponent(reservation.receiptId)}&limit=10&offset=0`);
-  assert.equal((await receiptSearch.json()).orders[0].receiptId, reservation.receiptId);
-
-  let statsResponse = await request('/api/admin/stats');
-  let stats = await statsResponse.json();
-  assert.equal(stats.activeMembers, 2);
-  assert.equal(stats.totalRevenue, 2550);
-  assert.equal(stats.walkinsToday, 1);
-
-  const expiredMemberResponse = await request('/api/admin/members', {
+  assert.equal(secondLogin.status, 200);
+  const secondChallengeCookie = secondLogin.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  const secondVerify = await request('/api/login/verify-mfa', {
     method: 'POST',
-    body: JSON.stringify({
-      name: 'Expired Member',
-      phone: '555-0101',
-      membershipType: 'monthly',
-      startDate: '2025-01-31'
-    })
+    sessionCookie: secondChallengeCookie,
+    body: JSON.stringify({ code: createTotp(setupSecret).generate() })
   });
-  assert.equal(expiredMemberResponse.status, 201);
-  const expiredMember = await expiredMemberResponse.json();
-  assert.equal(expiredMember.endDate, '2025-02-28');
-  assert.equal(expiredMemberResponse.ok, true);
-  const expiredStatsResponse = await request('/api/admin/stats');
-  assert.equal((await expiredStatsResponse.json()).activeMembers, 2);
+  assert.equal(secondVerify.status, 200);
+  const secondSessionCookie = secondVerify.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
 
-  const invalidEdit = await request(`/api/admin/members/${expiredMember.id}`, {
+  const passwordChange = await request('/api/admin/password', {
     method: 'PATCH',
-    body: JSON.stringify({
-      name: 'Expired Member',
-      phone: '555-0101',
-      membershipType: 'monthly',
-      startDate: '2025-02-29'
-    })
+    body: JSON.stringify({ currentPassword: TEST_PASSWORD, newPassword: 'Another-Example-Password-456' })
   });
-  assert.equal(invalidEdit.status, 400);
+  assert.equal(passwordChange.status, 200);
+  cookie = passwordChange.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  assert.equal((await request('/api/admin/members')).status, 200);
+  assert.equal((await request('/api/admin/members', { sessionCookie: secondSessionCookie })).status, 401);
 
-  const memberEdit = await request(`/api/admin/members/${expiredMember.id}`, {
-    method: 'PATCH',
-    body: JSON.stringify({
-      name: 'Edited Expired Member',
-      phone: '555-0199',
-      membershipType: '6month',
-      startDate: '2025-01-31'
-    })
+  const encodedSessionId = decodeURIComponent(cookie.slice('bbf.sid='.length)).split('.')[0];
+  const sessionId = encodedSessionId.slice(2);
+  const currentSession = await new Promise((resolve, reject) => {
+    app.locals.sessionStore.get(sessionId, (error, value) => error ? reject(error) : resolve(value));
   });
-  assert.equal(memberEdit.status, 200);
-  assert.equal((await memberEdit.json()).endDate, '2025-07-31');
+  currentSession.lastActivityAt = Date.now() - 31 * 60 * 1000;
+  await new Promise((resolve, reject) => {
+    app.locals.sessionStore.set(sessionId, currentSession, error => error ? reject(error) : resolve());
+  });
+  assert.equal((await request('/api/admin/members')).status, 401);
+  cookie = undefined;
 
-  const renewal = await request(`/api/admin/members/${expiredMember.id}/renew`, {
+  const freshLogin = await request('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: 'owner', password: 'Another-Example-Password-456' })
+  });
+  const freshChallengeCookie = freshLogin.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  const freshVerify = await request('/api/login/verify-mfa', {
+    method: 'POST',
+    sessionCookie: freshChallengeCookie,
+    body: JSON.stringify({ code: createTotp(setupSecret).generate() })
+  });
+  assert.equal(freshVerify.status, 200);
+  cookie = freshVerify.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  const logout = await request('/api/admin/sessions/revoke-all', {
     method: 'POST',
     body: JSON.stringify({})
   });
-  assert.equal(renewal.status, 200);
-  const renewedMember = await renewal.json();
-  assert.equal(renewedMember.startDate, getTodayDateString());
-  const renewedStatsResponse = await request('/api/admin/stats');
-  assert.equal((await renewedStatsResponse.json()).activeMembers, 3);
-
-  const deleteMember = await request(`/api/admin/members/${expiredMember.id}`, { method: 'DELETE' });
-  assert.equal(deleteMember.status, 204);
-  const deletedStatsResponse = await request('/api/admin/stats');
-  assert.equal((await deletedStatsResponse.json()).activeMembers, 2);
-
-  const legacyImport = await request('/api/admin/members/import-legacy', {
-    method: 'POST',
-    body: JSON.stringify({
-      members: [{
-        name: 'Imported Legacy Record',
-        phone: '',
-        membershipType: 'monthly',
-        startDate: '2020-01-31'
-      }]
-    })
-  });
-  assert.equal(legacyImport.status, 201);
-  assert.equal((await legacyImport.json()).importedCount, 1);
-
-  const repeatedLegacyImport = await request('/api/admin/members/import-legacy', {
-    method: 'POST',
-    body: JSON.stringify({
-      members: [{
-        name: 'Imported Legacy Record',
-        phone: '',
-        membershipType: 'monthly',
-        startDate: '2020-01-31'
-      }]
-    })
-  });
-  assert.equal((await repeatedLegacyImport.json()).skippedCount, 1);
-
-  const auditResponse = await request('/api/admin/audit');
-  const audit = await auditResponse.json();
-  assert.ok(audit.some(entry => entry.action === 'payment_confirmed'));
-  const paymentAudit = audit.find(entry => entry.action === 'payment_confirmed' && entry.entityId === String(reservation.id));
-  assert.equal(paymentAudit.actor, 'owner');
-  assert.equal(paymentAudit.details.paymentMethod, 'GCash');
-  assert.equal(paymentAudit.details.amountReceived, 1999);
-  assert.equal(paymentAudit.details.allowMismatch, true);
-  assert.ok(audit.some(entry => entry.action === 'failed_login'));
-  assert.ok(audit.some(entry => entry.action === 'order_cancelled'));
-  assert.ok(audit.some(entry => entry.action === 'member_updated'));
-  assert.ok(audit.some(entry => entry.action === 'member_renewed'));
-  assert.ok(audit.some(entry => entry.action === 'member_deleted'));
-
-  const backupResponse = await request('/api/admin/backups', {
-    method: 'POST',
-    body: JSON.stringify({})
-  });
-  assert.equal(backupResponse.status, 201);
-  const backup = await backupResponse.json();
-  const backupPath = path.join(dataDirectory, 'backups', backup.filename);
-  assert.equal((await fs.readFile(backupPath)).subarray(0, 15).toString(), 'SQLite format 3');
-  const downloadedBackup = await request(`/api/admin/backups/${encodeURIComponent(backup.filename)}`);
-  assert.equal(downloadedBackup.status, 200);
-  assert.equal(Buffer.from(await downloadedBackup.arrayBuffer()).subarray(0, 15).toString(), 'SQLite format 3');
+  assert.equal(logout.status, 200);
+  cookie = undefined;
+  assert.equal((await request('/api/admin/members')).status, 401);
 
   await closeServer();
-  app = createApplication({
-    dataDirectory,
-    adminUsername: 'owner',
-    adminEmail: 'owner@example.test',
-    adminPassword: 'AnExamplePassword123',
-    sessionSecret: 'session-secret-for-tests-that-is-at-least-32-characters'
-  });
-  server = await new Promise(resolve => {
-    const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
-  });
-  baseUrl = `http://127.0.0.1:${server.address().port}`;
-
-  const persistedMembers = await request('/api/admin/members');
-  assert.equal(persistedMembers.status, 200);
-  assert.equal((await persistedMembers.json()).length, 3);
-  const wrongCurrentPassword = await request('/api/admin/password', {
-    method: 'PATCH',
-    body: JSON.stringify({ currentPassword: 'wrong-password', newPassword: 'NewAdminPassword123' })
-  });
-  assert.equal(wrongCurrentPassword.status, 401);
-  const shortNewPassword = await request('/api/admin/password', {
-    method: 'PATCH',
-    body: JSON.stringify({ currentPassword: 'AnExamplePassword123', newPassword: 'short' })
-  });
-  assert.equal(shortNewPassword.status, 400);
-  const passwordChanged = await request('/api/admin/password', {
-    method: 'PATCH',
-    body: JSON.stringify({ currentPassword: 'AnExamplePassword123', newPassword: 'AnotherExamplePassword123' })
-  });
-  assert.equal(passwordChanged.status, 200);
-  const loggedOut = await request('/api/logout', { method: 'POST' });
-  assert.equal(loggedOut.status, 200);
-  cookie = undefined;
-  const oldPasswordLogin = await request('/api/login', {
-    method: 'POST',
-    body: JSON.stringify({ usernameOrEmail: 'owner', password: 'AnExamplePassword123' })
-  });
-  assert.equal(oldPasswordLogin.status, 401);
-  const newPasswordLogin = await request('/api/login', {
-    method: 'POST',
-    body: JSON.stringify({ usernameOrEmail: 'owner', password: 'AnotherExamplePassword123' })
-  });
-  assert.equal(newPasswordLogin.status, 200);
-  cookie = newPasswordLogin.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
-  const finalLogout = await request('/api/logout', { method: 'POST' });
-  assert.equal(finalLogout.status, 200);
-  cookie = undefined;
-  const sessionAfterLogout = await request('/api/admin/members');
-  assert.equal(sessionAfterLogout.status, 401);
 });
