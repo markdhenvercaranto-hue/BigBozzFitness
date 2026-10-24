@@ -238,8 +238,17 @@ test('Express serves static assets and async admin workflows using local libSQL'
   });
   assert.equal(registration.status, 201);
   const order = await registration.json();
+  assert.equal(typeof order.id, 'number');
+  assert.match(order.receiptId, /^BB-[A-F0-9]{10}$/);
+  assert.equal(order.name, 'Alex Member');
+  assert.equal(order.phone, '555-0100');
+  assert.equal(order.plan, 'Monthly Standard Plan');
+  assert.equal(order.planKey, 'monthly');
+  assert.equal(order.trainer, true);
   assert.equal(order.total, 2000);
   assert.equal(order.status, 'Unpaid');
+  assert.equal(order.email, 'alex@example.test');
+  assert.equal(order.preferredStartDate, getTodayDateString());
   assert.equal((await request('/api/registrations', {
     method: 'POST',
     body: JSON.stringify({ name: 'Bad email', phone: '555', email: 'not-an-email', planKey: 'walkin' })

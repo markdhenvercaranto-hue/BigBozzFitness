@@ -102,14 +102,14 @@ function mapMember(row) {
 
 function mapOrder(row) {
   return {
-    id: row.id,
+    id: Number(row.id),
     receiptId: row.receipt_id,
     name: row.name,
     phone: row.phone,
     plan: row.plan,
     planKey: row.plan_key,
     trainer: Boolean(row.trainer),
-    total: row.total,
+    total: Number(row.total),
     status: row.status,
     date: row.date,
     memberId: row.member_id,
@@ -118,7 +118,7 @@ function mapOrder(row) {
     preferredStartDate: row.preferred_start_date || '',
     paymentMethod: row.payment_method || '',
     paymentReference: row.payment_reference || '',
-    amountReceived: row.amount_received,
+    amountReceived: row.amount_received == null ? null : Number(row.amount_received),
     paidAt: row.paid_at || '',
     confirmedBy: row.confirmed_by || ''
   };
@@ -507,6 +507,9 @@ function createApplication(options = {}) {
         email: email || null,
         preferredStartDate
       });
+      if (!order || !order.receipt_id || !Number.isSafeInteger(Number(order.id))) {
+        throw new Error('The order was saved but its receipt details could not be loaded.');
+      }
       return res.status(201).json(mapOrder(order));
     } catch (error) {
       return respondWithError(res, error);

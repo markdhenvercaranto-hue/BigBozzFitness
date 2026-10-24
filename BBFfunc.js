@@ -363,15 +363,19 @@ function toggleMobileMenu() {
 // Registration & Receipt Generation
 async function handleRegistrationSubmit(event) {
     event.preventDefault();
+    const status = document.getElementById('registrationStatus');
+    const submitButton = event.currentTarget.querySelector('[type="submit"]');
+    status.textContent = 'Submitting registration and preparing your receipt…';
+    status.className = 'text-sm text-yellow-300 min-h-[20px]';
+    submitButton.disabled = true;
     const name = document.getElementById('regName').value;
     const phone = document.getElementById('regPhone').value;
     const calc = calculateTotal();
 
     const dateStr = new Date().toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
 
-    let order;
     try {
-        order = await adminApi('/api/registrations', {
+        const order = await adminApi('/api/registrations', {
             method: 'POST',
             body: JSON.stringify({
                 name,
@@ -382,28 +386,37 @@ async function handleRegistrationSubmit(event) {
                 trainer: calc.hasTrainer
             })
         });
+        if (!order || !order.receiptId || !order.name || !order.phone || !order.plan ||
+            !Number.isFinite(Number(order.total)) || !Number.isSafeInteger(Number(order.id))) {
+            throw new Error('The registration was received, but the receipt details were incomplete. Please contact the gym before submitting again.');
+        }
+
+        document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
+        document.getElementById('rcptDate').textContent = dateStr;
+        document.getElementById('rcptName').textContent = order.name;
+        document.getElementById('rcptPhone').textContent = order.phone;
+        document.getElementById('rcptPlanName').textContent = order.plan;
+        const planPrice = Number(order.total) - (order.trainer ? PRICING.trainer : 0);
+        document.getElementById('rcptPlanPrice').textContent = `₱${planPrice.toLocaleString()}`;
+        document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
+        document.getElementById('rcptTotal').textContent = `₱${Number(order.total).toLocaleString()}`;
+        document.getElementById('rcptStatus').textContent = 'UNPAID / RESERVED';
+        document.getElementById('rcptPaymentDetails').classList.add('hidden');
+
+        customersData.unshift(order);
+        document.getElementById('receiptActionStatus').textContent = '';
+        document.getElementById('receiptModal').classList.remove('hidden');
+        status.textContent = `Registration received. Receipt ${order.receiptId} is ready.`;
+        status.className = 'text-sm text-green-300 min-h-[20px]';
+        updateAdminStats();
     } catch (error) {
-        console.error('Unable to submit membership registration.', error);
-        window.alert(error.message);
-        return;
+        console.error('Unable to create or display membership receipt.', error);
+        status.textContent = error.message || 'We could not prepare your receipt. Please contact the gym before submitting again.';
+        status.className = 'text-sm text-red-300 min-h-[20px]';
+    } finally {
+        submitButton.disabled = false;
     }
 
-    document.getElementById('rcptNo').textContent = `#${order.receiptId}`;
-    document.getElementById('rcptDate').textContent = dateStr;
-    document.getElementById('rcptName').textContent = order.name;
-    document.getElementById('rcptPhone').textContent = order.phone;
-    document.getElementById('rcptPlanName').textContent = order.plan;
-    const planPrice = order.total - (order.trainer ? PRICING.trainer : 0);
-    document.getElementById('rcptPlanPrice').textContent = `₱${planPrice.toLocaleString()}`;
-    document.getElementById('rcptTrainerRow').classList.toggle('hidden', !order.trainer);
-    document.getElementById('rcptTotal').textContent = `₱${order.total.toLocaleString()}`;
-    document.getElementById('rcptStatus').textContent = 'UNPAID / RESERVED';
-    document.getElementById('rcptPaymentDetails').classList.add('hidden');
-
-    customersData.unshift(order);
-
-    document.getElementById('receiptModal').classList.remove('hidden');
-    updateAdminStats();
 }
 
 function closeReceiptModal() {
@@ -517,11 +530,15 @@ async function submitPaymentConfirmation(event) {
 }
 
 // Download Receipt as PDF
-function downloadReceiptPDF() {
-    const { jsPDF } = window.jspdf;
-    const element = document.getElementById('printableReceipt');
-
-    html2canvas(element, { scale: 2 }).then(canvas => {
+async function downloadReceiptPDF() {
+    const status = document.getElementById('receiptActionStatus');
+    try {
+        if (!window.jspdf?.jsPDF || typeof window.html2canvas !== 'function') {
+            throw new Error('PDF tools could not load. You can still print this receipt.');
+        }
+        const { jsPDF } = window.jspdf;
+        const element = document.getElementById('printableReceipt');
+        const canvas = await window.html2canvas(element, { scale: 2 });
         const imgData = canvas.toDataURL('image/png');
         const pdf = new jsPDF('p', 'mm', 'a6');
         const imgProps = pdf.getImageProperties(imgData);
@@ -530,7 +547,13 @@ function downloadReceiptPDF() {
 
         pdf.addImage(imgData, 'PNG', 0, 0, pdfWidth, pdfHeight);
         pdf.save(`BigBozz_Receipt_${document.getElementById('rcptNo').textContent}.pdf`);
-    });
+        status.textContent = 'Receipt PDF downloaded.';
+        status.className = 'text-xs text-green-300 min-h-[20px] text-center';
+    } catch (error) {
+        console.error('Unable to generate the receipt PDF in the browser.', error);
+        status.textContent = error.message || 'PDF generation failed. Use Print to save or print this receipt.';
+        status.className = 'text-xs text-red-300 min-h-[20px] text-center';
+    }
 }
 
 // Admin Dashboard Functions
