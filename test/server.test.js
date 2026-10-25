@@ -169,6 +169,10 @@ test('Express serves static assets and async admin workflows using local libSQL'
   assert.equal((await request('/BBFDesign.css')).status, 200);
   assert.equal((await request('/BBFfunc.js')).status, 200);
   assert.equal((await request('/api/admin/members')).status, 401);
+  assert.equal((await request('/api/admin/records/reset', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true })
+  })).status, 401);
 
   const publicOverview = await request('/api/dashboard/overview');
   assert.equal(publicOverview.status, 200);
@@ -413,4 +417,134 @@ test('Express serves static assets and async admin workflows using local libSQL'
   assert.equal((await request('/api/admin/members')).status, 401);
 
   await closeServer();
+});
+
+test('dashboard record reset requires owner confirmation and preserves admin data', async t => {
+  const { database } = await createLocalDatabase(t);
+  await database.initialize();
+  const owner = await database.createFirstAdmin({
+    id: crypto.randomUUID(),
+    username: 'owner',
+    passwordHash: await bcrypt.hash(TEST_PASSWORD, 4)
+  });
+  const staff = await database.createAdminAccount({
+    id: crypto.randomUUID(),
+    username: 'staff-user',
+    passwordHash: await bcrypt.hash(TEST_PASSWORD, 4),
+    role: 'staff'
+  }, 'owner');
+  await database.createMember({
+    id: crypto.randomUUID(),
+    name: 'Reset Test Member',
+    phone: '555-0100',
+    membershipType: 'monthly',
+    startDate: getTodayDateString(),
+    endDate: calculateMembershipEndDate(getTodayDateString(), 'monthly')
+  }, 'owner');
+  await database.createOrder({
+    receiptId: 'BB-RESET-TEST',
+    name: 'Reset Test Member',
+    phone: '555-0100',
+    plan: 'Monthly Standard Plan',
+    planKey: 'monthly',
+    trainer: false,
+    total: 500,
+    date: getTodayDateString(),
+    email: null,
+    preferredStartDate: getTodayDateString()
+  });
+
+  const app = createApplication({
+    database,
+    sessionSecret: 'test-session-secret-that-is-at-least-32-characters',
+    mfaEncryptionKey: TEST_MFA_KEY,
+    isProduction: false
+  });
+  const server = await new Promise(resolve => {
+    const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+  });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => {
+    if (server.listening) {
+      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  async function request(route, options = {}) {
+    const method = (options.method || 'GET').toUpperCase();
+    const headers = { ...(options.headers || {}) };
+    const { sessionCookie, ...fetchOptions } = options;
+    if (route.startsWith('/api/admin/') && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+      headers['X-Requested-With'] = 'fetch';
+      headers.Origin = baseUrl;
+    }
+    if (sessionCookie) headers.Cookie = sessionCookie;
+    if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    return fetch(`${baseUrl}${route}`, { ...fetchOptions, headers });
+  }
+
+  async function signIn(username) {
+    const login = await request('/api/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password: TEST_PASSWORD })
+    });
+    assert.equal(login.status, 200);
+    const challengeCookie = login.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+    const challenge = await login.json();
+    const verify = await request('/api/login/verify-mfa', {
+      method: 'POST',
+      sessionCookie: challengeCookie,
+      body: JSON.stringify({
+        code: createTotp(challenge.manualSecret, username).generate()
+      })
+    });
+    assert.equal(verify.status, 200);
+    return verify.headers.get('set-cookie').match(/bbf\.sid=[^;]+/)[0];
+  }
+
+  assert.equal((await request('/api/admin/records/reset', {
+    method: 'POST',
+    body: JSON.stringify({ confirmed: true })
+  })).status, 401);
+
+  const staffCookie = await signIn(staff.username);
+  assert.equal((await request('/api/admin/records/reset', {
+    method: 'POST',
+    sessionCookie: staffCookie,
+    body: JSON.stringify({ confirmed: true })
+  })).status, 403);
+
+  const ownerCookie = await signIn(owner.username);
+  assert.equal((await request('/api/admin/records/reset', {
+    method: 'POST',
+    sessionCookie: ownerCookie,
+    body: JSON.stringify({})
+  })).status, 400);
+
+  const reset = await request('/api/admin/records/reset', {
+    method: 'POST',
+    sessionCookie: ownerCookie,
+    body: JSON.stringify({ confirmed: true })
+  });
+  assert.equal(reset.status, 200);
+  assert.deepEqual(await reset.json(), { membersDeleted: 1, ordersDeleted: 1 });
+  assert.equal((await database.listMembers()).length, 0);
+  assert.equal((await database.listOrders()).total, 0);
+  assert.equal(await database.adminAccountCount(), 2);
+  assert.equal((await request('/api/admin/members', { sessionCookie: staffCookie })).status, 200);
+  const audit = await request('/api/admin/audit', { sessionCookie: ownerCookie });
+  const auditItems = await audit.json();
+  assert.ok(auditItems.some(entry => entry.action === 'registration_received'));
+  assert.ok(auditItems.some(entry =>
+    entry.action === 'dashboard_records_reset' &&
+    entry.actor === 'owner' &&
+    entry.details.membersDeleted === 1 &&
+    entry.details.ordersDeleted === 1
+  ));
+  assert.deepEqual(await (await request('/api/dashboard/overview')).json(), {
+    totalRevenue: 0,
+    activeMembers: 0,
+    walkinsToday: 0,
+    trainerCount: 0
+  });
 });

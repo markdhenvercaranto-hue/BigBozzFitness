@@ -193,6 +193,21 @@ function createDatabase(options = {}) {
       await initialize();
       return all(client, 'SELECT * FROM members ORDER BY created_at DESC, rowid DESC');
     },
+    async resetDashboardRecords(actor) {
+      return withWriteTransaction(async transaction => {
+        const orderCount = await one(transaction, 'SELECT COUNT(*) AS count FROM orders');
+        const memberCount = await one(transaction, 'SELECT COUNT(*) AS count FROM members');
+        const ordersDeleted = Number(orderCount.count);
+        const membersDeleted = Number(memberCount.count);
+        await run(transaction, 'DELETE FROM orders');
+        await run(transaction, 'DELETE FROM members');
+        await recordAudit(actor, 'dashboard_records_reset', 'dashboard', 'records', {
+          ordersDeleted,
+          membersDeleted
+        }, transaction);
+        return { ordersDeleted, membersDeleted };
+      });
+    },
     async publicOverview(today) {
       await initialize();
       const [revenue, active, walkins, trainers] = await Promise.all([

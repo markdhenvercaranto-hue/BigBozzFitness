@@ -133,6 +133,10 @@ async function showSection(view) {
         updatePortalButtonState(adminUnlocked);
         document.getElementById('adminTabNavigation').classList.toggle('hidden', !adminUnlocked);
         document.getElementById('adminActions').classList.toggle('hidden', !adminUnlocked);
+        document.getElementById('resetDashboardRecordsButton').classList.toggle(
+            'hidden',
+            !adminUnlocked || session.user?.role !== 'owner'
+        );
         document.getElementById('adminCodeButton').classList.toggle('hidden', adminUnlocked);
         if (!adminUnlocked) {
             await renderPublicDashboardOverview();
@@ -1169,6 +1173,39 @@ function exportDataCSV() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+}
+
+async function resetDashboardRecords() {
+    const confirmed = window.confirm(
+        'Permanently delete every member and reservation/order record, including paid, unpaid, and cancelled records? The dashboard metrics and revenue chart will be cleared. Admin accounts, sessions, and audit history will be kept. This cannot be undone.'
+    );
+    if (!confirmed) return;
+
+    const button = document.getElementById('resetDashboardRecordsButton');
+    button.disabled = true;
+    try {
+        const result = await adminApi('/api/admin/records/reset', {
+            method: 'POST',
+            body: JSON.stringify({ confirmed: true })
+        });
+        membersData = [];
+        customersData = [];
+        ordersPageData = [];
+        orderPageOffset = 0;
+        orderPageTotal = 0;
+        pendingOrderCount = 0;
+        editingMemberId = null;
+        updateAdminStats();
+        renderAdminTabContent();
+        window.alert(
+            `Dashboard records reset. Deleted ${result.membersDeleted} member(s) and ${result.ordersDeleted} reservation/order record(s). Audit history and admin accounts were kept.`
+        );
+    } catch (error) {
+        console.error('Unable to reset dashboard records.', error);
+        window.alert(error.message);
+    } finally {
+        button.disabled = false;
+    }
 }
 
 function updateAdminStats() {

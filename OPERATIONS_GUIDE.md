@@ -67,6 +67,8 @@ The Vercel/Turso setup creates the final schema for a fresh database. It does no
 
 The dashboard can export member and order data as CSV. Database backups are managed by Turso; configure its backup/restore options and retain an off-platform export for disaster recovery. The app does not write database backups to the Vercel function filesystem.
 
+The owner-only **Reset Records** action permanently deletes all member and reservation/order records, including paid, unpaid, and cancelled orders. This clears the dashboard metric cards and revenue chart. Export or back up data first; the reset requires confirmation and is recorded in the audit history. Admin accounts, sessions, and audit history are retained.
+
 Open **Security** to change the administrator password. Changing it rotates the current session and logs out other devices. **Log out all sessions** ends every admin session, including the current device. Admin sessions expire after 30 minutes without admin activity and have an eight-hour absolute lifetime. Failed sign-in attempts are audited without recording passwords, MFA secrets, or recovery codes.
 
 ## 5. Deployment and security checklist

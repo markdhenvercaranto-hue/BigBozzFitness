@@ -304,6 +304,17 @@ function createApplication(options = {}) {
     }
   });
 
+  app.post('/api/admin/records/reset', isAuthenticated, requireOwner, async (req, res) => {
+    if (req.body.confirmed !== true) {
+      return res.status(400).json({ message: 'Confirm the dashboard record reset before continuing.' });
+    }
+    try {
+      return res.json(await database.resetDashboardRecords(req.session.user.username));
+    } catch (error) {
+      return respondWithError(res, error);
+    }
+  });
+
   async function isAuthenticated(req, res, next) {
     try {
       if (!req.session || !req.session.isAuthenticated || !req.session.user || !req.session.user.id) {
