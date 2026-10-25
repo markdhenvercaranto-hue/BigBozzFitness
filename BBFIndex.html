@@ -599,48 +599,6 @@
                 </div>
             </div>
 
-            <div id="paymentConfirmationModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="paymentModalTitle">
-                <div class="bg-cardbg border border-gray-800 rounded-3xl max-w-md w-full p-6 shadow-2xl">
-                    <div class="flex items-start justify-between gap-4 mb-5">
-                        <div>
-                            <p class="text-xs uppercase tracking-widest text-gold-400 font-bold">Counter payment</p>
-                            <h2 id="paymentModalTitle" class="text-2xl font-heading font-bold text-white">CONFIRM PAYMENT</h2>
-                            <p id="paymentOrderSummary" class="text-sm text-gray-400 mt-2"></p>
-                        </div>
-                        <button type="button" onclick="closePaymentModal()" class="text-gray-400 hover:text-white p-2" aria-label="Close payment confirmation">
-                            <i class="fa-solid fa-xmark text-xl"></i>
-                        </button>
-                    </div>
-                    <form id="paymentConfirmationForm" class="space-y-4">
-                        <input id="paymentOrderId" type="hidden">
-                        <div>
-                            <label for="paymentMethod" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Payment method *</label>
-                            <select id="paymentMethod" required class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white">
-                                <option value="Cash">Cash</option>
-                                <option value="GCash">GCash</option>
-                            </select>
-                        </div>
-                        <div>
-                            <label for="paymentReference" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Reference number <span class="normal-case">(required for GCash)</span></label>
-                            <input id="paymentReference" type="text" maxlength="50" autocomplete="off" class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white">
-                        </div>
-                        <div>
-                            <label for="amountReceived" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Amount received (₱) *</label>
-                            <input id="amountReceived" type="number" min="0" step="0.01" required class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white">
-                        </div>
-                        <label class="flex items-start gap-3 text-sm text-gray-300">
-                            <input id="paymentMismatch" type="checkbox" class="mt-1 accent-yellow-500">
-                            <span>Allow the received amount to differ from the order total (record the amount above).</span>
-                        </label>
-                        <p id="paymentFormStatus" role="status" aria-live="polite" class="text-sm text-gray-400 min-h-[20px]"></p>
-                        <div class="flex gap-3">
-                            <button type="button" onclick="closePaymentModal()" class="flex-1 border border-gray-700 text-gray-300 py-3 rounded-xl font-semibold">Cancel</button>
-                            <button type="submit" class="flex-1 bg-gold-500 hover:bg-gold-600 text-black py-3 rounded-xl font-bold">Confirm paid</button>
-                        </div>
-                    </form>
-                </div>
-            </div>
-
             <!-- Actions -->
             <p id="receiptActionStatus" role="status" aria-live="polite" class="text-xs text-gray-400 min-h-[20px] text-center"></p>
             <div class="grid grid-cols-2 gap-3">
@@ -651,6 +609,48 @@
                     <i class="fa-solid fa-print"></i> Print
                 </button>
             </div>
+        </div>
+    </div>
+
+    <div id="paymentConfirmationModal" class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 hidden flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="paymentModalTitle">
+        <div class="bg-cardbg border border-gray-800 rounded-3xl max-w-md w-full p-6 shadow-2xl">
+            <div class="flex items-start justify-between gap-4 mb-5">
+                <div>
+                    <p class="text-xs uppercase tracking-widest text-gold-400 font-bold">Counter payment</p>
+                    <h2 id="paymentModalTitle" class="text-2xl font-heading font-bold text-white">CONFIRM PAYMENT</h2>
+                    <p id="paymentOrderSummary" class="text-sm text-gray-400 mt-2"></p>
+                </div>
+                <button type="button" onclick="closePaymentModal()" class="text-gray-400 hover:text-white p-2" aria-label="Close payment confirmation">
+                    <i class="fa-solid fa-xmark text-xl"></i>
+                </button>
+            </div>
+            <form id="paymentConfirmationForm" class="space-y-4">
+                <input id="paymentOrderId" type="hidden">
+                <div>
+                    <label for="paymentMethod" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Payment method *</label>
+                    <select id="paymentMethod" required class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white">
+                        <option value="Cash">Cash</option>
+                        <option value="GCash">GCash</option>
+                    </select>
+                </div>
+                <div>
+                    <label for="paymentReference" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Reference number <span class="normal-case">(required for GCash)</span></label>
+                    <input id="paymentReference" type="text" maxlength="50" autocomplete="off" class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white">
+                </div>
+                <div>
+                    <label for="amountReceived" class="block text-xs font-semibold text-gray-400 uppercase mb-2">Amount received (₱) *</label>
+                    <input id="amountReceived" type="number" min="0" step="0.01" required class="w-full bg-black/60 border border-gray-800 rounded-xl px-4 py-3 text-white">
+                </div>
+                <label class="flex items-start gap-3 text-sm text-gray-300">
+                    <input id="paymentMismatch" type="checkbox" class="mt-1 accent-yellow-500">
+                    <span>Allow the received amount to differ from the order total (record the amount above).</span>
+                </label>
+                <p id="paymentFormStatus" role="status" aria-live="polite" class="text-sm text-gray-400 min-h-[20px]"></p>
+                <div class="flex gap-3">
+                    <button type="button" onclick="closePaymentModal()" class="flex-1 border border-gray-700 text-gray-300 py-3 rounded-xl font-semibold">Cancel</button>
+                    <button type="submit" class="flex-1 bg-gold-500 hover:bg-gold-600 text-black py-3 rounded-xl font-bold">Confirm paid</button>
+                </div>
+            </form>
         </div>
     </div>
 

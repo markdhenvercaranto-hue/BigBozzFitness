@@ -167,6 +167,7 @@ test('Express serves static assets and async admin workflows using local libSQL'
   assert.match(await publicPage.text(), /ADMIN DASHBOARD/);
   assert.equal((await request('/BBFIndex.html')).status, 200);
   const paymentModalMarkup = await (await request('/BBFIndex.html')).text();
+  assert.match(paymentModalMarkup, /<\/div>\s*<\/div>\s*<div id="paymentConfirmationModal"/);
   for (const id of [
     'paymentConfirmationModal',
     'paymentConfirmationForm',
