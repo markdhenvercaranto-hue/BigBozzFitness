@@ -463,7 +463,8 @@ function showPaidReceipt(order) {
 }
 
 function openPaymentModal(orderId) {
-    const order = customersData.find(item => Number(item.id) === Number(orderId));
+    const order = customersData.find(item => Number(item.id) === Number(orderId)) ||
+        ordersPageData.find(item => Number(item.id) === Number(orderId));
     if (!order || order.status !== 'Unpaid') return;
     const form = document.getElementById('paymentConfirmationForm');
     form.reset();
