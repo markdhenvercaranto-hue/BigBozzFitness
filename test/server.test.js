@@ -166,6 +166,20 @@ test('Express serves static assets and async admin workflows using local libSQL'
   assert.equal(publicPage.status, 200);
   assert.match(await publicPage.text(), /ADMIN DASHBOARD/);
   assert.equal((await request('/BBFIndex.html')).status, 200);
+  const paymentModalMarkup = await (await request('/BBFIndex.html')).text();
+  for (const id of [
+    'paymentConfirmationModal',
+    'paymentConfirmationForm',
+    'paymentOrderId',
+    'paymentOrderSummary',
+    'paymentMethod',
+    'paymentReference',
+    'amountReceived',
+    'paymentMismatch',
+    'paymentFormStatus'
+  ]) {
+    assert.match(paymentModalMarkup, new RegExp(`id="${id}"`));
+  }
   assert.equal((await request('/BBFDesign.css')).status, 200);
   assert.equal((await request('/BBFfunc.js')).status, 200);
   assert.equal((await request('/api/admin/members')).status, 401);
@@ -279,6 +293,9 @@ test('Express serves static assets and async admin workflows using local libSQL'
   });
   assert.equal(paid.status, 200);
   const paidOrder = await paid.json();
+  assert.equal(typeof paidOrder.id, 'number');
+  assert.equal(typeof paidOrder.total, 'number');
+  assert.doesNotThrow(() => JSON.stringify(paidOrder));
   assert.equal(paidOrder.status, 'Paid');
   assert.equal(paidOrder.confirmedBy, 'owner');
   assert.ok(paidOrder.memberId);

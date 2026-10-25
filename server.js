@@ -660,36 +660,34 @@ function createApplication(options = {}) {
     try {
       const currentOrder = await database.getOrder(orderId);
       if (!currentOrder) return res.status(404).json({ message: 'Order not found.' });
+      const expectedTotal = Number(currentOrder.total);
+      if (!Number.isFinite(expectedTotal)) {
+        throw new Error('The order total is not a valid number.');
+      }
       if (currentOrder.status === 'Paid') return res.json(mapOrder(currentOrder));
       if (currentOrder.status === 'Cancelled') {
         return res.status(409).json({ message: 'Cancelled orders cannot be paid.' });
       }
-    } catch (error) {
-      return respondWithError(res, error);
-    }
-    const paymentMethod = req.body.paymentMethod === undefined ? 'Cash' : req.body.paymentMethod;
-    if (req.body.paymentReference !== undefined && typeof req.body.paymentReference !== 'string') {
-      return res.status(400).json({ message: 'Reference number must be text.' });
-    }
-    const paymentReference = typeof req.body.paymentReference === 'string' ? req.body.paymentReference.trim() : '';
-    const amountReceived = req.body.amountReceived === undefined
-      ? undefined
-      : req.body.amountReceived;
-    if (!['Cash', 'GCash'].includes(paymentMethod)) {
-      return res.status(400).json({ message: 'Choose Cash or GCash as the payment method.' });
-    }
-    if (paymentReference.length > 50 || (paymentMethod === 'GCash' && !paymentReference)) {
-      return res.status(400).json({ message: 'Reference numbers must be 50 characters or fewer; GCash requires one.' });
-    }
-    try {
-      const currentOrder = await database.getOrder(orderId);
-      const received = amountReceived === undefined ? currentOrder.total : amountReceived;
+
+      const paymentMethod = req.body.paymentMethod === undefined ? 'Cash' : req.body.paymentMethod;
+      if (req.body.paymentReference !== undefined && typeof req.body.paymentReference !== 'string') {
+        return res.status(400).json({ message: 'Reference number must be text.' });
+      }
+      const paymentReference = typeof req.body.paymentReference === 'string' ? req.body.paymentReference.trim() : '';
+      if (!['Cash', 'GCash'].includes(paymentMethod)) {
+        return res.status(400).json({ message: 'Choose Cash or GCash as the payment method.' });
+      }
+      if (paymentReference.length > 50 || (paymentMethod === 'GCash' && !paymentReference)) {
+        return res.status(400).json({ message: 'Reference numbers must be 50 characters or fewer; GCash requires one.' });
+      }
+      const amountReceived = req.body.amountReceived;
+      const received = amountReceived === undefined ? expectedTotal : Number(amountReceived);
       if (typeof received !== 'number' || !Number.isFinite(received) || received < 0 || received > 1000000000) {
         return res.status(400).json({ message: 'Enter a valid amount received.' });
       }
-      if (received !== currentOrder.total && req.body.allowMismatch !== true) {
+      if (received !== expectedTotal && req.body.allowMismatch !== true) {
         return res.status(400).json({
-          message: `Amount received must equal ₱${Number(currentOrder.total).toLocaleString()} unless you explicitly allow the mismatch.`,
+          message: `Amount received must equal ₱${expectedTotal.toLocaleString()} unless you explicitly allow the mismatch.`,
           requiresMismatchConfirmation: true
         });
       }

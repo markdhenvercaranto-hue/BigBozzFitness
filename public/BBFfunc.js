@@ -463,10 +463,46 @@ function showPaidReceipt(order) {
 }
 
 function openPaymentModal(orderId) {
-    const order = customersData.find(item => Number(item.id) === Number(orderId)) ||
-        ordersPageData.find(item => Number(item.id) === Number(orderId));
-    if (!order || order.status !== 'Unpaid') return;
+    const numericOrderId = Number(orderId);
+    const order = Number.isSafeInteger(numericOrderId)
+        ? customersData.find(item => Number(item.id) === numericOrderId) ||
+            ordersPageData.find(item => Number(item.id) === numericOrderId)
+        : null;
+    if (!order) {
+        console.error('Unable to open payment confirmation: order was not found in the loaded dashboard records.', { orderId });
+        window.alert('This order is not available in the current dashboard list. Refresh the Orders & Registrations tab and try again.');
+        return;
+    }
+    if (order.status !== 'Unpaid') {
+        console.error('Unable to open payment confirmation: order is not unpaid.', {
+            orderId: numericOrderId,
+            status: order.status
+        });
+        window.alert(`This order is ${order.status.toLowerCase()} and cannot be confirmed as paid.`);
+        return;
+    }
     const form = document.getElementById('paymentConfirmationForm');
+    if (!form) {
+        console.error('Unable to open payment confirmation: paymentConfirmationForm is missing from the page.');
+        window.alert('The payment form could not be loaded. Refresh the page and try again.');
+        return;
+    }
+    const requiredIds = [
+        'paymentConfirmationModal',
+        'paymentOrderId',
+        'paymentOrderSummary',
+        'paymentMethod',
+        'paymentReference',
+        'amountReceived',
+        'paymentMismatch',
+        'paymentFormStatus'
+    ];
+    const missingIds = requiredIds.filter(id => !document.getElementById(id));
+    if (missingIds.length) {
+        console.error('Unable to open payment confirmation: required form elements are missing.', { missingIds });
+        window.alert('The payment form is incomplete. Refresh the page and try again.');
+        return;
+    }
     form.reset();
     document.getElementById('paymentOrderId').value = order.id;
     document.getElementById('paymentOrderSummary').textContent =
