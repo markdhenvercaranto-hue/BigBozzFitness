@@ -3,12 +3,12 @@
   "rewrites": [
     {
       "source": "/(.*)",
-      "destination": "/server.js"
+      "destination": "/api"
     }
   ],
   "functions": {
-    "server.js": {
-      "includeFiles": "{BBFIndex.html,public/BBFDesign.css,public/BBFfunc.js}"
+    "api/index.js": {
+      "includeFiles": "{BBFIndex.html,public/**}"
     }
   }
 }
