@@ -254,8 +254,10 @@ async function togglePortal() {
     const isAdminVisible = !document.getElementById('adminView').classList.contains('hidden');
     if (isAdminVisible) {
         showSection('public');
-    } else {
+    } else if (adminUnlocked) {
         showSection('admin');
+    } else {
+        openAdminLoginModal();
     }
 }
 
