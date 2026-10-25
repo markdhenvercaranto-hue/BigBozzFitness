@@ -8,7 +8,7 @@
   ],
   "functions": {
     "server.js": {
-      "includeFiles": "{BBFIndex.html,BBFDesign.css,BBFfunc.js}"
+      "includeFiles": "{BBFIndex.html,public/BBFDesign.css,public/BBFfunc.js}"
     }
   }
 }

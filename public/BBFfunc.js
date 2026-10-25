@@ -199,6 +199,17 @@ async function adminApi(endpoint, options = {}) {
     return data;
 }
 
+async function readLoginResponse(response) {
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.toLowerCase().includes('application/json')) {
+        if (!response.ok) {
+            throw new Error(`The sign-in service returned an unexpected response (HTTP ${response.status}). Check the Vercel function logs and required environment variables.`);
+        }
+        throw new Error('The sign-in service returned an unexpected response. Refresh the page and try again.');
+    }
+    return response.json();
+}
+
 async function loadAdminData() {
     const [serverMembers, orders] = await Promise.all([
         adminApi('/api/admin/members'),
@@ -313,7 +324,7 @@ function bindAdminLoginForm() {
                         password: document.getElementById('adminPassword').value
                     })
                 });
-                data = await response.json();
+                data = await readLoginResponse(response);
                 if (!response.ok) throw new Error(data.message || 'Sign in failed.');
 
                 mfaChallengePending = true;
@@ -341,7 +352,7 @@ function bindAdminLoginForm() {
                 headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                 body: JSON.stringify({ code: document.getElementById('adminMfaCode').value })
             });
-            data = await response.json();
+            data = await readLoginResponse(response);
             if (!response.ok) throw new Error(data.message || 'Verification failed.');
             statusEl.textContent = 'Admin controls unlocked. Opening dashboard...';
             statusEl.className = 'text-xs text-green-300 min-h-[20px]';

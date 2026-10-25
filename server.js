@@ -828,8 +828,8 @@ function createApplication(options = {}) {
   });
 
   app.use('/api', (req, res) => res.status(404).json({ message: 'API endpoint not found.' }));
-  app.get('/BBFDesign.css', (req, res) => res.sendFile(path.join(__dirname, 'BBFDesign.css')));
-  app.get('/BBFfunc.js', (req, res) => res.sendFile(path.join(__dirname, 'BBFfunc.js')));
+  app.get('/BBFDesign.css', (req, res) => res.sendFile(path.join(__dirname, 'public', 'BBFDesign.css')));
+  app.get('/BBFfunc.js', (req, res) => res.sendFile(path.join(__dirname, 'public', 'BBFfunc.js')));
   app.get('/BBFIndex.html', (req, res) => res.sendFile(path.join(__dirname, 'BBFIndex.html')));
   app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'BBFIndex.html')));
   app.get('/admin', (req, res) => {
