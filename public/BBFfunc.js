@@ -196,6 +196,10 @@ async function adminApi(endpoint, options = {}) {
     });
     if (response.status === 204) return null;
 
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.toLowerCase().includes('application/json')) {
+        throw new Error(`The server returned an unexpected response (HTTP ${response.status}). Check the server or Vercel function logs.`);
+    }
     const data = await response.json();
     if (!response.ok) {
         throw new Error(data.message || `Request failed (${response.status}).`);
@@ -459,7 +463,7 @@ function showPaidReceipt(order) {
 }
 
 function openPaymentModal(orderId) {
-    const order = customersData.find(item => item.id === orderId);
+    const order = customersData.find(item => Number(item.id) === Number(orderId));
     if (!order || order.status !== 'Unpaid') return;
     const form = document.getElementById('paymentConfirmationForm');
     form.reset();
@@ -526,24 +530,39 @@ async function submitPaymentConfirmation(event) {
     };
     status.textContent = 'Saving payment…';
     submitButton.disabled = true;
+    let paidOrder;
     try {
-        const paidOrder = await adminApi(`/api/admin/orders/${orderId}/payment`, {
+        paidOrder = await adminApi(`/api/admin/orders/${orderId}/payment`, {
             method: 'PATCH',
             body: JSON.stringify(payload)
         });
-        closePaymentModal();
-        await loadAdminData();
-        updateAdminStats();
-        if (currentAdminTab === 'orders') await loadOrdersPage();
-        else renderAdminTabContent();
-        showPaidReceipt(paidOrder);
     } catch (error) {
         console.error('Unable to confirm order payment.', error);
         status.textContent = error.message;
         status.className = 'text-sm text-red-300 min-h-[20px]';
-    } finally {
         submitButton.disabled = false;
+        return;
     }
+
+    closePaymentModal();
+    customersData = customersData.map(order => order.id === paidOrder.id ? paidOrder : order);
+    ordersPageData = ordersPageData.map(order => order.id === paidOrder.id ? paidOrder : order);
+    updateAdminStats();
+    let refreshError;
+    try {
+        await loadAdminData();
+        updateAdminStats();
+        if (currentAdminTab === 'orders') await loadOrdersPage();
+        else renderAdminTabContent();
+    } catch (error) {
+        refreshError = error;
+        console.error('Payment was confirmed, but dashboard data could not be refreshed.', error);
+    }
+    showPaidReceipt(paidOrder);
+    if (refreshError) {
+        window.alert(`Payment was confirmed${paidOrder.memberId ? ' and the membership was recorded' : ''}, but the dashboard could not refresh: ${refreshError.message}. Refresh the page to reload the latest records.`);
+    }
+    submitButton.disabled = false;
 }
 
 // Download Receipt as PDF
@@ -1065,7 +1084,8 @@ async function confirmPayment(orderId) {
 }
 
 async function cancelOrder(orderId) {
-    const order = customersData.find(item => item.id === orderId) || ordersPageData.find(item => item.id === orderId);
+    const order = customersData.find(item => Number(item.id) === Number(orderId)) ||
+        ordersPageData.find(item => Number(item.id) === Number(orderId));
     if (!order || order.status !== 'Unpaid') return;
     if (!window.confirm(`Cancel the unpaid order ${order.receiptId} for ${order.name}?`)) return;
     try {

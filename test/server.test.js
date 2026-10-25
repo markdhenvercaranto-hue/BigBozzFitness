@@ -285,7 +285,14 @@ test('Express serves static assets and async admin workflows using local libSQL'
 
   const members = await request('/api/admin/members');
   assert.equal(members.status, 200);
-  assert.equal((await members.json()).length, 1);
+  const createdMembers = await members.json();
+  assert.equal(createdMembers.length, 1);
+  assert.equal(createdMembers[0].id, paidOrder.memberId);
+  assert.equal(createdMembers[0].name, order.name);
+  assert.equal(createdMembers[0].phone, order.phone);
+  assert.equal(createdMembers[0].membershipType, order.planKey);
+  assert.equal(createdMembers[0].startDate, order.preferredStartDate);
+  assert.equal(createdMembers[0].endDate, calculateMembershipEndDate(order.preferredStartDate, order.planKey));
   const audit = await request('/api/admin/audit');
   assert.equal(audit.status, 200);
   assert.ok((await audit.json()).some(entry => entry.action === 'payment_confirmed' && entry.actor === 'owner'));
